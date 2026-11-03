@@ -18,9 +18,9 @@ const server: Server = {
 }
 
 describe('DeleteServerDialog', () => {
-  it('offers exact SSH access revocation for the RackTop managed key', () => {
+  it('offers exact SSH access revocation for the ModelGym managed key', () => {
     const markup = renderToStaticMarkup(<DeleteServerDialog server={{ ...server, identityFile: '~/.ssh/racktop_ed25519' }} onClose={vi.fn()} onDelete={vi.fn()} />)
-    expect(markup).toContain('同时撤销 RackTop 配置的免密登录')
+    expect(markup).toContain('同时撤销 ModelGym 配置的免密登录')
     expect(markup).toContain('authorized_keys')
     expect(markup).toContain('type="checkbox"')
     expect(markup).not.toContain('checked=""')
@@ -28,6 +28,6 @@ describe('DeleteServerDialog', () => {
 
   it('does not offer automatic revocation for a user-owned key', () => {
     const markup = renderToStaticMarkup(<DeleteServerDialog server={{ ...server, identityFile: '~/.ssh/id_ed25519' }} onClose={vi.fn()} onDelete={vi.fn()} />)
-    expect(markup).not.toContain('同时撤销 RackTop 配置的免密登录')
+    expect(markup).not.toContain('同时撤销 ModelGym 配置的免密登录')
   })
 })

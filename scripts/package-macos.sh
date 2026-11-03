@@ -20,7 +20,7 @@ esac
 
 TARGET_ROOT="${CARGO_TARGET_DIR:-$ROOT_DIR/src-tauri/target}"
 TARGET_DIR="$TARGET_ROOT/$TARGET/release/bundle"
-APP_PATH="$TARGET_DIR/macos/RackTop.app"
+APP_PATH="$TARGET_DIR/macos/ModelGym.app"
 NOTARY_VALUES=0
 for value in "${APPLE_ID:-}" "${APPLE_PASSWORD:-}" "${APPLE_TEAM_ID:-}"; do
   if [ -n "$value" ]; then
@@ -41,13 +41,13 @@ if [ "$SIGNING_IDENTITY" = "-" ] && [ "$MARK_UNSIGNED" = "1" ]; then
 elif [ "$SIGNING_IDENTITY" != "-" ] && [ "$NOTARY_VALUES" -ne 3 ]; then
   DMG_SUFFIX="-unnotarized"
 fi
-DMG_PATH="$TARGET_DIR/dmg/RackTop_${APP_VERSION}_macos-${ARCH_LABEL}${DMG_SUFFIX}.dmg"
+DMG_PATH="$TARGET_DIR/dmg/ModelGym_${APP_VERSION}_macos-${ARCH_LABEL}${DMG_SUFFIX}.dmg"
 CHECKSUM_PATH="$DMG_PATH.sha256"
 SIGNING_INFO_PATH="$DMG_PATH.signing.txt"
-UPDATER_PATH="$TARGET_DIR/macos/RackTop_${APP_VERSION}_macos-${ARCH_LABEL}.app.tar.gz"
+APP_ARCHIVE_PATH="$TARGET_DIR/macos/ModelGym_${APP_VERSION}_macos-${ARCH_LABEL}.app.tar.gz"
 DMG_BACKGROUND_SVG="$ROOT_DIR/src-tauri/dmg-background.svg"
 DMG_BACKGROUND_RENDERER="$ROOT_DIR/scripts/render-dmg-background.swift"
-DMG_VOLUME_NAME="安装 RackTop ${APP_VERSION}"
+DMG_VOLUME_NAME="安装 ModelGym ${APP_VERSION}"
 STAGE_DIR="$(mktemp -d /private/tmp/racktop-dmg.XXXXXX)"
 MOUNT_DIR=""
 RW_DMG_PATH=""
@@ -76,7 +76,7 @@ if [ "$SKIP_BUILD" != "1" ]; then
 fi
 
 if [ ! -d "$APP_PATH" ]; then
-  printf 'RackTop.app was not found at %s\n' "$APP_PATH" >&2
+  printf 'ModelGym.app was not found at %s\n' "$APP_PATH" >&2
   exit 1
 fi
 
@@ -93,13 +93,9 @@ else
 fi
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
-if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || [ -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]; then
-  rm -f "$UPDATER_PATH" "$UPDATER_PATH.sig"
-  COPYFILE_DISABLE=1 tar -czf "$UPDATER_PATH" -C "$(dirname "$APP_PATH")" "$(basename "$APP_PATH")"
-  npm run tauri -- signer sign "$UPDATER_PATH"
-else
-  printf 'Updater signing key not configured; skipping macOS updater artifact.\n'
-fi
+# This is a manual application archive, not an upstream updater artifact.
+rm -f "$APP_ARCHIVE_PATH"
+COPYFILE_DISABLE=1 tar -czf "$APP_ARCHIVE_PATH" -C "$(dirname "$APP_PATH")" "$(basename "$APP_PATH")"
 
 if [ ! -f "$DMG_BACKGROUND_SVG" ]; then
   printf 'DMG background was not found at %s\n' "$DMG_BACKGROUND_SVG" >&2
@@ -110,7 +106,7 @@ if [ ! -f "$DMG_BACKGROUND_RENDERER" ]; then
   exit 1
 fi
 
-ditto --norsrc --noextattr --noqtn "$APP_PATH" "$STAGE_DIR/RackTop.app"
+ditto --norsrc --noextattr --noqtn "$APP_PATH" "$STAGE_DIR/ModelGym.app"
 ln -s /Applications "$STAGE_DIR/应用程序"
 mkdir -p "$STAGE_DIR/.background"
 swift "$DMG_BACKGROUND_RENDERER" "$DMG_BACKGROUND_SVG" "$STAGE_DIR/.background/background.png" 1
@@ -144,7 +140,7 @@ tell application "Finder"
     set icon size of theViewOptions to 96
     set text size of theViewOptions to 13
     set background picture of theViewOptions to file ".background:background.png"
-    set position of item "RackTop.app" of container window to {205, 188}
+    set position of item "ModelGym.app" of container window to {205, 188}
     set position of item "应用程序" of container window to {515, 188}
     close container window
     open
@@ -184,9 +180,9 @@ fi
 hdiutil verify "$DMG_PATH"
 MOUNT_DIR="$(mktemp -d /private/tmp/racktop-mount.XXXXXX)"
 hdiutil attach "$DMG_PATH" -readonly -nobrowse -mountpoint "$MOUNT_DIR" >/dev/null
-codesign --verify --deep --strict --verbose=2 "$MOUNT_DIR/RackTop.app"
+codesign --verify --deep --strict --verbose=2 "$MOUNT_DIR/ModelGym.app"
 if [ "$NOTARIZATION_MODE" = "notarized and stapled" ]; then
-  spctl --assess --type execute --verbose=2 "$MOUNT_DIR/RackTop.app"
+  spctl --assess --type execute --verbose=2 "$MOUNT_DIR/ModelGym.app"
 fi
 detach_dmg "$MOUNT_DIR"
 rmdir "$MOUNT_DIR"
@@ -200,6 +196,4 @@ shasum -a 256 "$DMG_PATH" | tee "$CHECKSUM_PATH"
   printf 'notarization=%s\n' "$NOTARIZATION_MODE"
 } | tee "$SIGNING_INFO_PATH"
 printf 'DMG=%s\n' "$DMG_PATH"
-if [ -f "$UPDATER_PATH" ]; then
-  printf 'UPDATER=%s\n' "$UPDATER_PATH"
-fi
+printf 'APP_ARCHIVE=%s\n' "$APP_ARCHIVE_PATH"

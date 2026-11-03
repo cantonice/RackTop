@@ -1,4 +1,4 @@
-name: Build RackTop
+name: Build ModelGym
 
 on:
   workflow_dispatch:
@@ -43,23 +43,13 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev libdbus-1-dev openssh-client xterm gnome-keyring xvfb
       - run: npm ci
       - run: npm run test
+      - name: Test remote training queue on Linux
+        run: python3 src-tauri/tests/training_queue_test.py -v
       - name: Read package version
         run: echo "RACKTOP_VERSION=$(node -p "require('./package.json').version")" >> "$GITHUB_ENV"
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
-      - name: Build signed Linux release packages
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - name: Build Linux packages
         run: npm run bundle:linux
-      - name: Sign DEB updater package
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          for package in src-tauri/target/release/bundle/deb/*.deb; do
-            npm run tauri -- signer sign "$package"
-            test -s "$package.sig"
-          done
       - name: Smoke-test packaged application
         run: |
           set -euo pipefail
@@ -67,12 +57,11 @@ jobs:
           test -n "$DEB_PATH"
           dpkg-deb --info "$DEB_PATH"
           dpkg-deb --extract "$DEB_PATH" "$RUNNER_TEMP/racktop-deb"
-          APP_PATH="$RUNNER_TEMP/racktop-deb/usr/bin/racktop"
+          APP_PATH="$RUNNER_TEMP/racktop-deb/usr/bin/ModelGym"
           test -x "$APP_PATH"
           APPIMAGE_PATH=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -type f -print -quit)
           test -n "$APPIMAGE_PATH"
           APPIMAGE_PATH=$(realpath "$APPIMAGE_PATH")
-          test -s "$APPIMAGE_PATH.sig"
           xvfb-run -a dbus-run-session -- bash scripts/smoke-linux.sh "$APP_PATH"
           mkdir -p "$RUNNER_TEMP/racktop-appimage"
           (cd "$RUNNER_TEMP/racktop-appimage" && "$APPIMAGE_PATH" --appimage-extract)
@@ -81,19 +70,17 @@ jobs:
         run: sha256sum src-tauri/target/release/bundle/deb/*.deb src-tauri/target/release/bundle/appimage/*.AppImage > src-tauri/target/release/bundle/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: RackTop_${{ env.RACKTOP_VERSION }}_linux-x64-deb
+          name: ModelGym_${{ env.RACKTOP_VERSION }}_linux-x64-deb
           if-no-files-found: error
           path: |
             src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/deb/*.sig
             src-tauri/target/release/bundle/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: RackTop_${{ env.RACKTOP_VERSION }}_linux-x64-appimage
+          name: ModelGym_${{ env.RACKTOP_VERSION }}_linux-x64-appimage
           if-no-files-found: error
           path: |
             src-tauri/target/release/bundle/appimage/*.AppImage
-            src-tauri/target/release/bundle/appimage/*.sig
             src-tauri/target/release/bundle/SHA256SUMS
 
   macos:
@@ -181,28 +168,25 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           RACKTOP_MACOS_TARGET: aarch64-apple-darwin
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run bundle:macos
 
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
-          name: RackTop_${{ env.RACKTOP_VERSION }}_macos-arm64-dmg
+          name: ModelGym_${{ env.RACKTOP_VERSION }}_macos-arm64-dmg
           if-no-files-found: error
           path: |
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.sha256
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.signing.txt
 
-      - name: Upload macOS updater package
+      - name: Upload macOS app archive
         uses: actions/upload-artifact@v4
         with:
-          name: RackTop_${{ env.RACKTOP_VERSION }}_macos-arm64-updater
+          name: ModelGym_${{ env.RACKTOP_VERSION }}_macos-arm64-app
           if-no-files-found: error
           path: |
             src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
-            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
 
   windows:
     if: inputs.build_windows
@@ -218,6 +202,8 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - run: npm ci
       - run: npm run test
+      - name: Test remote training queue fixtures
+        run: python src-tauri/tests/training_queue_test.py -v
       - name: Read package version
         shell: pwsh
         run: |
@@ -227,8 +213,6 @@ jobs:
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           args: --target x86_64-pc-windows-msvc --bundles msi,nsis
           uploadWorkflowArtifacts: false
@@ -245,31 +229,31 @@ jobs:
           $msiArgs = "/a `"$($msi.FullName)`" /qn /norestart TARGETDIR=`"$msiExtract`""
           $msiProcess = Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru
           if ($msiProcess.ExitCode -ne 0) { throw "MSI administrative install failed with exit code $($msiProcess.ExitCode)." }
-          if (-not (Get-ChildItem $msiExtract -Recurse -Filter 'RackTop.exe' -ErrorAction SilentlyContinue)) {
-            throw 'MSI did not contain RackTop.exe.'
+          if (-not (Get-ChildItem $msiExtract -Recurse -Filter 'ModelGym.exe' -ErrorAction SilentlyContinue)) {
+            throw 'MSI did not contain ModelGym.exe.'
           }
 
           $nsisInstall = Join-Path $env:RUNNER_TEMP 'racktop-nsis-install'
           $nsisProcess = Start-Process $nsis.FullName -ArgumentList "/S /D=$nsisInstall" -Wait -PassThru
           if ($nsisProcess.ExitCode -ne 0) { throw "NSIS installation failed with exit code $($nsisProcess.ExitCode)." }
-          $app = Get-ChildItem $nsisInstall -Recurse -Filter 'RackTop.exe' | Select-Object -First 1
-          if (-not $app) { throw 'NSIS installation did not create RackTop.exe.' }
+          $app = Get-ChildItem $nsisInstall -Recurse -Filter 'ModelGym.exe' | Select-Object -First 1
+          if (-not $app) { throw 'NSIS installation did not create ModelGym.exe.' }
 
           $appProcess = Start-Process $app.FullName -PassThru
           Start-Sleep -Seconds 5
-          if ($appProcess.HasExited) { throw "Installed RackTop exited early with code $($appProcess.ExitCode)." }
+          if ($appProcess.HasExited) { throw "Installed ModelGym exited early with code $($appProcess.ExitCode)." }
           for ($attempt = 0; $attempt -lt 2; $attempt++) {
             $duplicate = Start-Process $app.FullName -PassThru
             if (-not $duplicate.WaitForExit(10000)) {
               Stop-Process -Id $duplicate.Id -Force
-              throw 'Duplicate RackTop launch did not exit within 10 seconds.'
+              throw 'Duplicate ModelGym launch did not exit within 10 seconds.'
             }
             if ($duplicate.ExitCode -ne 0) { throw "Duplicate launch failed with exit code $($duplicate.ExitCode)." }
             $appProcess.Refresh()
-            if ($appProcess.HasExited) { throw 'Original RackTop exited during duplicate launch.' }
+            if ($appProcess.HasExited) { throw 'Original ModelGym exited during duplicate launch.' }
             $instances = @(Get-Process | Where-Object { $_.Path -eq $app.FullName })
             if ($instances.Count -ne 1 -or $instances[0].Id -ne $appProcess.Id) {
-              throw 'Repeated launch did not preserve exactly one original RackTop process.'
+              throw 'Repeated launch did not preserve exactly one original ModelGym process.'
             }
           }
           Stop-Process -Id $appProcess.Id -Force
@@ -282,16 +266,15 @@ jobs:
       - name: Upload Windows setup package
         uses: actions/upload-artifact@v4
         with:
-          name: RackTop_${{ env.RACKTOP_VERSION }}_x64-setup
+          name: ModelGym_${{ env.RACKTOP_VERSION }}_x64-setup
           if-no-files-found: error
           path: |
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe.sig
 
       - name: Upload Windows MSI package
         uses: actions/upload-artifact@v4
         with:
-          name: RackTop_${{ env.RACKTOP_VERSION }}_x64_zh-CN-msi
+          name: ModelGym_${{ env.RACKTOP_VERSION }}_x64_zh-CN-msi
           if-no-files-found: error
           path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
 
@@ -319,6 +302,6 @@ jobs:
           PYCODE
       - uses: actions/upload-artifact@v4
         with:
-          name: RackTop_build-source
+          name: ModelGym_build-source
           path: build-source.json
           if-no-files-found: error

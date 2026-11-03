@@ -38,7 +38,7 @@ export function OnboardingChecklist({ steps, previewStep, collapsed, dismissed, 
       <header>
         <button className="onboarding-checklist__heading" onClick={() => onCollapsedChange(!collapsed)} aria-expanded={!collapsed}>
           <span className="onboarding-checklist__mark"><Check size={15} /></span>
-          <span><strong id="onboarding-title">开始使用 RackTop</strong><small>{allComplete ? '基础工作流已就绪' : `完成 ${complete} / ${steps.length} · 下一步：${visibleSteps[currentIndex].title}`}</small></span>
+          <span><strong id="onboarding-title">开始使用 ModelGym</strong><small>{allComplete ? '基础工作流已就绪' : `完成 ${complete} / ${steps.length} · 下一步：${visibleSteps[currentIndex].title}`}</small></span>
           <ChevronRight className="onboarding-checklist__chevron" size={15} />
         </button>
         <div className="onboarding-checklist__tools">

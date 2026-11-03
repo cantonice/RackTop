@@ -3,18 +3,18 @@
   <id>com.racktop.desktop</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
-  <name>RackTop</name>
-  <summary>GPU and CPU server monitoring over SSH</summary>
+  <name>ModelGym</name>
+  <summary>Model training and GPU server management over SSH</summary>
   <description>
-    <p>RackTop monitors GPU, CPU, memory and processes across Linux servers over SSH.</p>
+    <p>ModelGym configures, queues and monitors model training on GPU servers over SSH.</p>
     <p>Manage remote terminals, projects and training tasks from a single desktop application.</p>
   </description>
-  <launchable type="desktop-id">RackTop.desktop</launchable>
+  <launchable type="desktop-id">ModelGym.desktop</launchable>
   <provides>
-    <binary>racktop</binary>
+    <binary>ModelGym</binary>
   </provides>
-  <pkgname>rack-top</pkgname>
-  <icon type="stock">racktop</icon>
+  <pkgname>model-gym</pkgname>
+  <icon type="stock">ModelGym</icon>
   <categories>
     <category>Development</category>
   </categories>

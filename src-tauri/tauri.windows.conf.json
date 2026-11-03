@@ -4,7 +4,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "RackTop",
+        "title": "ModelGym",
         "width": 1500,
         "height": 900,
         "minWidth": 900,

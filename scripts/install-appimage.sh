@@ -3,7 +3,7 @@ set -euo pipefail
 
 [[ $(uname -s) == Linux ]] || { printf 'This installer is for Linux.\n' >&2; exit 1; }
 
-source_image=$(realpath "${1:?Usage: bash scripts/install-appimage.sh /path/to/RackTop.AppImage}")
+source_image=$(realpath "${1:?Usage: bash scripts/install-appimage.sh /path/to/ModelGym.AppImage}")
 project_root=$(cd "$(dirname "$0")/.." && pwd)
 install_root="$HOME/.local/lib/racktop"
 data_root="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -21,10 +21,10 @@ escaped_executable=${escaped_executable//\"/\\\"}
 escaped_executable=${escaped_executable//\$/\\\$}
 escaped_executable=${escaped_executable//\`/\\\`}
 escaped_executable=${escaped_executable//%/%%}
-# Match GTK's program name and the actual X11 WM_CLASS (racktop, Racktop).
+# Keep the existing install/desktop/icon identity and GTK class for upgrades.
 desktop_file="$data_root/applications/racktop.desktop"
 {
-  printf '[Desktop Entry]\nType=Application\nName=RackTop\n'
+  printf '[Desktop Entry]\nType=Application\nName=ModelGym\n'
   printf 'Exec="%s/RackTop.AppImage"\n' "$escaped_executable"
   printf 'Icon=racktop-appimage\nStartupWMClass=Racktop\nTerminal=false\nCategories=Development;\n'
 } > "$desktop_file"

@@ -22,7 +22,7 @@ function UpdateRing({ value }: { value?: number }) {
 }
 
 export function AppUpdateTriggerButton({ version, onClick }: { version: string; onClick: () => void }) {
-  return <button className="brand__update brand__update--trigger" onClick={onClick} aria-label={`有新版本 RackTop ${version}，点击下载并安装`} title={`更新到 RackTop ${version}`}>
+  return <button className="brand__update brand__update--trigger" onClick={onClick} aria-label={`有新版本 ModelGym ${version}，点击下载并安装`} title={`更新到 ModelGym ${version}`}>
     <CircleArrowUp className="brand__update-icon" size={16} strokeWidth={2} />
   </button>
 }
@@ -34,10 +34,10 @@ export function AppUpdateProgressButton({ state }: AppUpdateProgressButtonProps)
   const label = state.phase === 'checking'
     ? '正在检查更新'
     : state.phase === 'installing'
-      ? `正在安装 RackTop ${state.version}`
+      ? `正在安装 ModelGym ${state.version}`
       : determinate
-        ? `正在下载 RackTop ${state.version}，已完成 ${value}%`
-        : `正在下载 RackTop ${state.version}`
+        ? `正在下载 ModelGym ${state.version}，已完成 ${value}%`
+        : `正在下载 ModelGym ${state.version}`
 
   return <span className="brand__update-progress" role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={value} title={label}>
     <UpdateRing value={value} />
@@ -63,7 +63,7 @@ export function AppUpdateDialog({ state, onClose, onRetry, onManualDownload }: A
         <button className="icon-button" onClick={onClose} aria-label="关闭更新窗口"><X size={17} /></button>
       </div></> : <div className="app-update-body">
         <div className="app-update-status-copy">
-          <strong id="app-update-title">{checking ? '正在检查更新' : installing ? `正在安装 RackTop ${state.version}` : `正在下载 RackTop ${state.version}`}</strong>
+          <strong id="app-update-title">{checking ? '正在检查更新' : installing ? `正在安装 ModelGym ${state.version}` : `正在下载 ModelGym ${state.version}`}</strong>
           <span>{checking ? '请稍候...' : installing ? '下载完成' : progressLabel}</span>
         </div>
         <div className={`app-update-progress${percent === null || checking || installing ? ' is-indeterminate' : ''}`} role="progressbar" aria-label={checking ? '正在检查更新' : installing ? '正在安装更新' : '更新下载进度'} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent === null || checking || installing ? undefined : Math.round(percent)}>

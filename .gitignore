@@ -5,3 +5,6 @@ src-tauri/target/
 output/playwright/
 .DS_Store
 *.log
+artifacts/
+__pycache__/
+*.pyc

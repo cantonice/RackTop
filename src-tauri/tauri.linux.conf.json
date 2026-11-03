@@ -1,18 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "plugins": {
-    "updater": {
-      "endpoints": [
-        "https://api.github.com/repos/Tongzh-SEU/RackTop/contents/latest.json?ref=updater",
-        "https://raw.githubusercontent.com/Tongzh-SEU/RackTop/updater/latest.json"
-      ]
-    }
-  },
   "app": {
     "windows": [
       {
         "label": "main",
-        "title": "RackTop",
+        "title": "ModelGym",
         "width": 1320,
         "height": 820,
         "minWidth": 900,

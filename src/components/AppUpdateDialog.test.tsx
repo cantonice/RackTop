@@ -64,7 +64,7 @@ describe('AppUpdateDialog', () => {
 
   it('shows compact progress and no cancellation control while active', () => {
     const { container } = renderDialog('downloading')
-    expect(container.textContent).toContain('正在下载 RackTop 1.25.4')
+    expect(container.textContent).toContain('正在下载 ModelGym 1.25.4')
     expect(container.textContent).toContain('MB /')
     expect(container.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('58')
     expect(container.querySelector('button')).toBeNull()
@@ -72,7 +72,7 @@ describe('AppUpdateDialog', () => {
 
   it('keeps installation non-cancellable', () => {
     const { container } = renderDialog('installing')
-    expect(container.textContent).toContain('正在安装 RackTop 1.25.4')
+    expect(container.textContent).toContain('正在安装 ModelGym 1.25.4')
     expect(container.querySelector('button')).toBeNull()
   })
 

@@ -3,5 +3,5 @@
   <text x="360" y="45" fill="#666B73" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="13" font-weight="500" text-anchor="middle">拖动以安装</text>
   <path d="M314 177H405" fill="none" stroke="#AEB3BA" stroke-width="2" stroke-linecap="round"/>
   <path d="M397 169L405 177L397 185" fill="none" stroke="#AEB3BA" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="360" y="356" fill="#777C84" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="12" font-weight="400" text-anchor="middle">将 RackTop 拖到“应用程序”即可完成安装</text>
+  <text x="360" y="356" fill="#777C84" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="12" font-weight="400" text-anchor="middle">将 ModelGym 拖到“应用程序”即可完成安装</text>
 </svg>

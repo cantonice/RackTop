@@ -1,7 +1,7 @@
 [package]
 name = "racktop"
-version = "1.26.2"
-description = "Live GPU & CPU monitoring for every server"
+version = "1.27.0"
+description = "ModelGym model training and GPU server management"
 authors = ["RackTop"]
 edition = "2024"
 default-run = "racktop"

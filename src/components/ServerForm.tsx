@@ -122,12 +122,12 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
     setSshSetupConfirmed(true)
     setSetupCopyAttempted(false)
     setError(null)
-    setSetupVerification({ phase: 'success', message: 'RackTop 专用密钥已验证，可以保存并连接。' })
+    setSetupVerification({ phase: 'success', message: 'ModelGym 专用密钥已验证，可以保存并连接。' })
   }
 
   async function verifySetupManually() {
     const attempt = ++setupVerificationAttempt.current
-    setSetupVerification({ phase: 'verifying', message: '正在验证 RackTop 专用密钥…' })
+    setSetupVerification({ phase: 'verifying', message: '正在验证 ModelGym 专用密钥…' })
     try {
       await api.verifySshSetup(managedIdentityDraft())
       if (attempt === setupVerificationAttempt.current) completeSetupVerification()
@@ -217,11 +217,11 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
             <button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button>
           </header>
           <div className="ssh-onboarding__body">
-            <div className="ssh-onboarding__lead"><span><KeyRound size={22} /></span><div><strong>RackTop 专用 Ed25519 密钥</strong><p>与日常 SSH 密钥分开保存，删除服务器时可以精确撤销 RackTop 的免密授权。</p></div><em>推荐</em></div>
+            <div className="ssh-onboarding__lead"><span><KeyRound size={22} /></span><div><strong>ModelGym 专用 Ed25519 密钥</strong><p>与日常 SSH 密钥分开保存，删除服务器时可以精确撤销 ModelGym 的免密授权。</p></div><em>推荐</em></div>
             <ol className="ssh-onboarding__steps">
               <li><span>1</span><div><strong>填写连接地址</strong><p>输入服务器 IP、端口和用户名；物理位置只用于现场查找机器。</p></div></li>
               <li><span>2</span><div><strong>复制快速配置</strong><p>在认证方式下展开“SSH 密钥快速配置”，复制为当前服务器生成的整段命令。</p></div></li>
-              <li><span>3</span><div><strong>在本机终端执行</strong><p>命令会创建 RackTop 专用密钥、写入服务器并验证专用密钥登录，再返回 RackTop 保存。</p></div></li>
+              <li><span>3</span><div><strong>在本机终端执行</strong><p>命令会创建 ModelGym 专用密钥、写入服务器并验证专用密钥登录，再返回 ModelGym 保存。</p></div></li>
             </ol>
             <div className="ssh-onboarding__notes"><span><Terminal size={16} /><p><strong>已有 SSH 配置？</strong>可直接选择 SSH Agent、私钥或 SSH Config。首次连接仍需核对 Host Key 指纹。</p></span><label><input type="checkbox" checked={dismissGuide} onChange={(event) => setDismissGuide(event.target.checked)} />以后新增服务器时直接进入表单</label></div>
           </div>
@@ -276,7 +276,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
                 <AlertTriangle size={20} />
                 <div>
                   <strong>不建议长期使用密码登录</strong>
-                  <p>优先使用 SSH Agent。RackTop 不会把密码写入配置或 SQLite；选择保存时仅写入系统安全凭据存储。</p>
+                  <p>优先使用 SSH Agent。ModelGym 不会把密码写入配置或 SQLite；选择保存时仅写入系统安全凭据存储。</p>
                   <label className="checkbox-row">
                     <input type="checkbox" checked={passwordAcknowledged} onChange={(event) => setPasswordAcknowledged(event.target.checked)} />
                     我理解风险并继续使用密码
@@ -295,7 +295,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
               <details className="key-guide">
                 <summary>
                   <span className="key-guide__summary-icon"><KeyRound size={17} /></span>
-                  <span className="key-guide__summary-copy"><strong>SSH 密钥快速配置</strong><small>配置可独立撤销的 RackTop 专用密钥</small></span>
+                  <span className="key-guide__summary-copy"><strong>SSH 密钥快速配置</strong><small>配置可独立撤销的 ModelGym 专用密钥</small></span>
                   <ChevronRight className="key-guide__chevron" size={16} aria-hidden="true" />
                 </summary>
                 <div className="key-guide__toolbar">
@@ -311,7 +311,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
               <label>跳板机 ProxyJump<input value={draft.proxyJump ?? ''} onChange={(event) => set('proxyJump', event.target.value)} placeholder="可选" /></label>
               <label>标签<div className="server-tag-input" onClick={(event) => event.currentTarget.querySelector('input')?.focus()}>{draft.tags.map((tag, index) => <span className="server-tag-input__token" key={`${tag}-${index}`}>{tag}</span>)}<input aria-label="添加服务器标签" value={tagText} onChange={(event) => updateTagText(event.target.value)} onBlur={commitTagText} onKeyDown={(event) => { if ((event.key === 'Backspace' || event.key === 'Delete') && editLastTag()) event.preventDefault() }} placeholder={draft.tags.length === 0 ? 'lab, h100' : ''} /></div></label>
             </div>
-            <label className="switch-row remote-history-row"><Database size={18} /><span><strong>服务器远端缓存 30 天</strong><small>固定保留 30 天；RackTop 关闭期间继续采集，重新打开后同步到本机 90 天历史。不保存进程和命令。</small></span><input type="checkbox" checked={draft.remoteHistoryEnabled} onChange={(event) => set('remoteHistoryEnabled', event.target.checked)} /></label>
+            <label className="switch-row remote-history-row"><Database size={18} /><span><strong>服务器远端缓存 30 天</strong><small>固定保留 30 天；ModelGym 关闭期间继续采集，重新打开后同步到本机 90 天历史。不保存进程和命令。</small></span><input type="checkbox" checked={draft.remoteHistoryEnabled} onChange={(event) => set('remoteHistoryEnabled', event.target.checked)} /></label>
             {error && <p className="form-error" role="alert">{error}</p>}
           </div>
           <footer className="sheet__footer">

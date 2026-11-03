@@ -6,6 +6,7 @@ import { detectAppPlatform } from './utils/platform'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { syncLinuxWindowShape } from './utils/linuxWindowShape'
 import './styles.css'
+import './training.css'
 
 document.documentElement.dataset.platform = detectAppPlatform(api.isDesktop, navigator.userAgent)
 if (document.documentElement.dataset.platform === 'linux') {

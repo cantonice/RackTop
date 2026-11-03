@@ -13,6 +13,7 @@ pub mod storage;
 pub mod disk_scan;
 mod terminal;
 mod tray_theme;
+mod training_queue;
 
 #[cfg(target_os = "windows")]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -289,7 +290,7 @@ async fn delete_server(
     let managed_public_key = if revoke_ssh_access {
         Some(
             ssh_keys::managed_public_key(&server)?
-                .ok_or("这台服务器未使用 RackTop 专用密钥，无法自动撤销免密登录")?,
+                .ok_or("这台服务器未使用 ModelGym 专用密钥，无法自动撤销免密登录")?,
         )
     } else {
         None
@@ -299,7 +300,7 @@ async fn delete_server(
         Ok(()) => {
             database.delete_server(&server_id)?;
             let suffix = if revoke_ssh_access {
-                "，并已撤销 RackTop 免密登录"
+                "，并已撤销 ModelGym 免密登录"
             } else {
                 ""
             };
@@ -307,7 +308,7 @@ async fn delete_server(
                 remote_cleaned: true,
                 cleanup_pending: false,
                 message: format!(
-                    "已删除“{}”及其本地与远端 RackTop 数据{}",
+                    "已删除“{}”及其本地与远端 ModelGym 数据{}",
                     server.name, suffix
                 ),
             })
@@ -423,7 +424,7 @@ fn open_setup_terminal(script: String) -> Result<(), String> {
 
         let path = shell_quote(script_path.to_string_lossy().as_ref());
         let command = format!(
-            "clear; printf '%s\\n\\n' 'RackTop SSH 密钥快速配置'; cat {path}; printf '%s\\n\\n' '正在执行…'; /bin/sh {path}; status=$?; rm -f {path}; printf '\\n%s\\n' 'RackTop SSH 配置已结束。'; exit $status"
+            "clear; printf '%s\\n\\n' 'ModelGym SSH 密钥快速配置'; cat {path}; printf '%s\\n\\n' '正在执行…'; /bin/sh {path}; status=$?; rm -f {path}; printf '\\n%s\\n' 'ModelGym SSH 配置已结束。'; exit $status"
         );
         let apple_script_command = command.replace('\\', "\\\\").replace('"', "\\\"");
         Command::new("osascript").args(["-e", &format!("tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{apple_script_command}\"")]).spawn().map_err(|error| format!("无法打开 macOS Terminal：{error}"))?;
@@ -502,7 +503,7 @@ async fn verify_ssh_setup(draft: ServerDraft) -> Result<(), String> {
         .stderr(std::process::Stdio::piped());
     let output = tokio::time::timeout(std::time::Duration::from_secs(12), command.output())
         .await
-        .map_err(|_| "等待 RackTop 专用密钥验证超时".to_string())?
+        .map_err(|_| "等待 ModelGym 专用密钥验证超时".to_string())?
         .map_err(|error| format!("无法启动系统 ssh：{error}"))?;
     if !output.status.success() {
         return Err(collector::classify_ssh_error(
@@ -1275,7 +1276,7 @@ fn build_tray_menu(
     reservation_pending: usize,
     process_warnings: usize,
 ) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
-    let open = MenuItemBuilder::with_id("open", "打开 RackTop").build(app)?;
+    let open = MenuItemBuilder::with_id("open", "打开 ModelGym").build(app)?;
     let reservations = MenuItemBuilder::with_id(
         "reservations",
         format!("预约待处理  {}", reservation_pending),
@@ -1298,14 +1299,14 @@ fn build_tray_menu(
 
 #[cfg(target_os = "macos")]
 fn build_application_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
-    let about = MenuItemBuilder::with_id("menu-about", "关于 RackTop").build(app)?;
+    let about = MenuItemBuilder::with_id("menu-about", "关于 ModelGym").build(app)?;
     let settings = MenuItemBuilder::with_id("menu-settings", "设置…")
         .accelerator("CmdOrCtrl+,")
         .build(app)?;
-    let quit = MenuItemBuilder::with_id("menu-quit", "退出 RackTop")
+    let quit = MenuItemBuilder::with_id("menu-quit", "退出 ModelGym")
         .accelerator("CmdOrCtrl+Q")
         .build(app)?;
-    let racktop = SubmenuBuilder::new(app, "RackTop")
+    let racktop = SubmenuBuilder::new(app, "ModelGym")
         .items(&[&about, &settings])
         .separator()
         .item(&quit)
@@ -1398,7 +1399,7 @@ fn update_tray_summary(
     });
     let tray = app
         .tray_by_id("racktop-tray")
-        .ok_or("找不到 RackTop 菜单栏图标")?;
+        .ok_or("找不到 ModelGym 菜单栏图标")?;
     // Replacing an unchanged native menu dismisses it while the user is reading it.
     if counts_changed {
         let menu = build_tray_menu(&app, reservation_pending, process_warnings)
@@ -1418,7 +1419,7 @@ fn update_tray_summary(
     )
     .map_err(|error| error.to_string())?;
     tray.set_tooltip(Some(&format!(
-        "RackTop · 预约待处理 {} · 我的进程异常 {}",
+        "ModelGym · 预约待处理 {} · 我的进程异常 {}",
         reservation_pending, process_warnings
     )))
     .map_err(|error| error.to_string())?;
@@ -1461,7 +1462,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        // ModelGym has no update feed yet. Do not initialize the upstream updater.
         .setup(|app| {
             if let Err(error) = process_lifetime::install() {
                 eprintln!("Windows 子进程生命周期隔离未启用：{error}");
@@ -1474,6 +1475,9 @@ pub fn run() {
                 Box::<dyn std::error::Error>::from(std::io::Error::other(error))
             })?;
             app.manage(database);
+            app.manage(training_queue::TrainingStore::open(&app_data.join("modelgym-training.sqlite")).map_err(|error| {
+                Box::<dyn std::error::Error>::from(std::io::Error::other(error))
+            })?);
             app.manage(TerminalManager::default());
             app.manage(disk_scan::DiskScanManager::default());
             app.manage(InteractionLogStore::default());
@@ -1547,7 +1551,7 @@ pub fn run() {
                     #[cfg(not(target_os = "windows"))]
                     let _ = (tray, event);
                 })
-                .tooltip("RackTop · GPU 与 CPU 监控")
+                .tooltip("ModelGym · GPU 与 CPU 监控")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "open" | "reservations" | "mine-processes" => {
@@ -1638,13 +1642,21 @@ pub fn run() {
             launch_managed_run,
             read_managed_run_log,
             get_managed_run_status,
+            training_queue::training_list_profiles,
+            training_queue::training_save_profile,
+            training_queue::training_delete_profile,
+            training_queue::training_check_paths,
+            training_queue::training_submit,
+            training_queue::training_list_jobs,
+            training_queue::training_cancel_job,
+            training_queue::training_read_log,
             update_tray_summary,
             window_minimize,
             window_toggle_maximize,
             window_close
         ])
         .run(tauri::generate_context!())
-        .expect("RackTop 启动失败");
+        .expect("ModelGym 启动失败");
 }
 
 #[cfg(test)]

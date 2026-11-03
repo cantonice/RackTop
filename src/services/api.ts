@@ -597,14 +597,7 @@ export const api = {
     return settings
   },
   async getLatestRelease(): Promise<ReleaseInfo> {
-    if (!isTauri) return { version: '1.25.2', url: 'https://github.com/Tongzh-SEU/RackTop/releases/tag/v1.25.2', publishedAt: new Date().toISOString() }
-    const response = await fetch('https://api.github.com/repos/Tongzh-SEU/RackTop/releases/latest', {
-      headers: { Accept: 'application/vnd.github+json' },
-    })
-    if (!response.ok) throw new Error(`GitHub Release 检查失败（HTTP ${response.status}）`)
-    const release = await response.json() as { tag_name?: string; html_url?: string; published_at?: string }
-    if (!release.tag_name || !release.html_url) throw new Error('GitHub Release 返回内容不完整')
-    return { version: release.tag_name.replace(/^v/i, ''), url: release.html_url, publishedAt: release.published_at }
+    throw new Error('ModelGym 自动更新尚未配置，请使用提供的安装包更新。')
   },
   async retryNvidia(serverId: string): Promise<Snapshot> {
     return this.collectServer(serverId, true, true, true, true)

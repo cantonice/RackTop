@@ -4284,6 +4284,36 @@ mod tests {
     }
 
     #[test]
+    fn modelgym_training_store_preserves_existing_servers_settings_and_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy_path = directory.path().join("racktop.sqlite");
+        let original = Database::open(&legacy_path).unwrap();
+        let server = original.save_server(draft("Existing RackTop server", 90)).unwrap();
+        let mut settings = original.get_settings().unwrap();
+        settings.idle_notifications_enabled = false;
+        original.save_settings(&settings).unwrap();
+        original.save_snapshot(&snapshot(&server.id, 2_000_000)).unwrap();
+        let history = original.get_history(&server.id, 0).unwrap();
+        assert!(!history.is_empty());
+        drop(original);
+
+        let training_path = directory.path().join("modelgym-training.sqlite");
+        let training = crate::training_queue::TrainingStore::open(&training_path).unwrap();
+        drop(training);
+        let upgraded = Database::open(&legacy_path).unwrap();
+
+        assert_eq!(upgraded.list_servers().unwrap().len(), 1);
+        assert_eq!(upgraded.get_server(&server.id).unwrap().name, server.name);
+        assert!(!upgraded.get_settings().unwrap().idle_notifications_enabled);
+        assert_eq!(
+            serde_json::to_value(upgraded.get_history(&server.id, 0).unwrap()).unwrap(),
+            serde_json::to_value(history).unwrap()
+        );
+        assert_eq!(upgraded.list_latest_snapshots().unwrap()[0].server_id, server.id);
+        assert!(legacy_path.is_file() && training_path.is_file());
+    }
+
+    #[test]
     fn server_round_trip_does_not_store_password() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
