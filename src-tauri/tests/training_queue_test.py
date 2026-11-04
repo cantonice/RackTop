@@ -4,7 +4,9 @@ Run with Python on Windows or Linux. Windows tests do not claim Linux /proc,
 process-group or SSH integration coverage; those boundaries use explicit mocks.
 """
 import concurrent.futures
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -83,6 +85,14 @@ else:
 
     def profile(self, devices=None):
         return queue.normalize_profile({"id": str(uuid.uuid4()), "name": "GPU training", "serverId": "server-a", "workingDirectory": str(self.workdir), "interpreter": shlex.quote(sys.executable) + " -u", "scriptPath": self.script.name, "configPath": self.config.name, "configMode": "flag", "configFlag": "--config", "extraArguments": "--epochs 2", "gpuUuids": devices if devices is not None else ["GPU-a"], "minimumFreeMemoryGb": 8}, require_gpus=bool(devices is None or devices))
+
+    def test_missing_config_mode_defaults_to_positional_and_preserves_explicit_flag(self):
+        profile = self.profile()
+        self.assertEqual(profile["configMode"], "flag")
+        del profile["configMode"]
+        defaulted = queue.normalize_profile(profile)
+        self.assertEqual(defaulted["configMode"], "positional")
+        self.assertNotIn("--config", queue.command_argv(defaulted))
 
     def state(self, **updates):
         value = json.loads(self.gpu_state.read_text(encoding="utf-8"))
@@ -269,6 +279,27 @@ else:
             queue.run_job(job_id)
             child.assert_not_called()
         self.assertEqual(queue.load_job(job_id)["status"], "cancelled")
+
+    def test_nested_script_keeps_project_cwd_and_logs_resolved_launch_context(self):
+        tools = self.workdir / "tools"
+        tools.mkdir()
+        script = tools / "train.py"
+        (self.workdir / "relative-data.txt").write_text("project data", encoding="utf-8")
+        script.write_text("from pathlib import Path\nPath('received.txt').write_text(Path('relative-data.txt').read_text())\n", encoding="utf-8")
+        profile, job_id = self.profile(), str(uuid.uuid4())
+        profile["scriptPath"] = str(script)
+        queue.submit(job_id, profile, True)
+        job = queue.load_job(job_id)
+        job.update({"status": "running", "pid": os.getpid(), "gpuIndices": [0], "processIdentity": {"pid": os.getpid(), "startTicks": "10", "bootId": "test-boot"}})
+        queue.save_job(job)
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            queue.run_job(job_id)
+        self.assertEqual((self.workdir / "received.txt").read_text(), "project data")
+        self.assertEqual(queue.load_job(job_id)["status"], "completed")
+        self.assertIn(str(self.workdir.resolve()), log.getvalue())
+        self.assertIn(str(script.resolve()), log.getvalue())
+        self.assertIn("CUDA_VISIBLE_DEVICES=GPU-a", log.getvalue())
 
     def test_failed_training_is_recorded_without_automatic_retry(self):
         self.script.write_text("raise SystemExit(7)\n", encoding="utf-8")

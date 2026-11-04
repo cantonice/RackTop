@@ -6,6 +6,32 @@ import type { TrainingGpu, TrainingJob, TrainingPathCheck, TrainingProfile, Trai
 const PROFILE_KEY = 'modelgym.trainingProfiles.v1'
 const JOB_KEY = 'modelgym.trainingJobs.preview.v1'
 
+type TrainingServer = Pick<Server, 'host' | 'name' | 'username' | 'sshAlias'>
+
+export function defaultTrainingInterpreter(server?: TrainingServer): string {
+  if (!server?.username.trim()) return 'python -u'
+  const host = server.host.trim()
+  const ipv4 = /^(?:\d{1,3}\.){3}(\d{1,3})$/.exec(host)
+  const number = ipv4 ? Number(ipv4[1]) : [host, server.sshAlias ?? '', server.name]
+    .map((value) => /(?:^|[-_\s]|服务器|训练机|server|gpu)(20|21|22|23|26|27|28)(?=$|[-_\s.()（）]|号)/i.exec(value)?.[1])
+    .find(Boolean)
+  const environment = [20, 21, 23].includes(Number(number)) ? 'torch29-cu130'
+    : [22, 26, 27, 28].includes(Number(number)) ? 'deploy' : null
+  if (!environment) return 'python -u'
+  const path = `/home/${server.username.trim()}/miniconda3/envs/${environment}/bin/python`
+  return /^[A-Za-z0-9_./-]+$/.test(path) ? path : shellQuote(path)
+}
+
+export function trainingServerChange(profile: TrainingProfile, previousServer: Server | undefined, nextServer: Server | undefined): Pick<TrainingProfile, 'serverId' | 'gpuUuids' | 'interpreter'> {
+  const interpreter = profile.interpreter.trim()
+  return {
+    serverId: nextServer?.id ?? '',
+    gpuUuids: [],
+    interpreter: !interpreter || interpreter === defaultTrainingInterpreter(previousServer)
+      ? defaultTrainingInterpreter(nextServer) : profile.interpreter,
+  }
+}
+
 function readPreview<T>(key: string): T[] {
   if (typeof localStorage === 'undefined') return []
   try { const value: unknown = JSON.parse(localStorage.getItem(key) ?? '[]'); return Array.isArray(value) ? value as T[] : [] } catch { return [] }
@@ -56,9 +82,10 @@ export function trainingGpuFromSnapshot(snapshot: Snapshot, minimumFreeMemoryGb:
   })
 }
 
-export function trainingSnapshotIssue(server: Server | undefined, snapshot: Snapshot | undefined): string | null {
+export function trainingSnapshotIssue(server: Server | undefined, snapshot: Snapshot | undefined, checkedAt?: number): string | null {
   if (!server) return '请选择训练服务器。'
   if (server.status === 'offline' || snapshot?.status === 'offline') return '服务器离线，无法提交新训练。'
+  if (checkedAt !== undefined && (!snapshot || checkedAt >= snapshot.timestamp) && Math.floor(Date.now() / 1000) - checkedAt <= Math.max(30, server.samplingIntervalSeconds * 6)) return null
   if (!snapshot) return '等待服务器 GPU 数据，或点击“检查路径与环境”取得最新结果。'
   if (snapshot.acceleratorVendor && snapshot.acceleratorVendor !== 'nvidia') return '当前训练队列支持 NVIDIA GPU。'
   if (Math.floor(Date.now() / 1000) - snapshot.timestamp > Math.max(30, server.samplingIntervalSeconds * 6)) return 'GPU 快照已过期，提交前将重新检查服务器。'

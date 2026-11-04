@@ -16,6 +16,20 @@ the application binary. Bundler tools are cached under `src-tauri/target/.tauri/
 Release signing and upstream updater artifacts are disabled; ModelGym never checks
 or installs updates from RackTop's publishing feed.
 
+## Application icons
+
+The application, Windows shortcuts, MSI product icon, NSIS installer/uninstaller
+and tray use the ModelGym dumbbell mark from the sidebar. `icons/icon.svg` is the
+desktop source; regenerate checked-in ICO, ICNS, PNG, favicon and tray RGBA assets
+with `node scripts/export-modelgym-icons.mjs` from the repository root after
+installing the project dependencies. The exporter uses the installed Tauri CLI
+and Node built-ins, without adding image-conversion dependencies. The dumbbell
+paths come from Lucide under its ISC license, preserved in `icons/LUCIDE_LICENSE`.
+
+Build a new application/installer after changing the assets; replacing source
+files does not change icons embedded in an existing EXE. Windows can temporarily
+cache an old shortcut icon until Explorer refreshes it.
+
 ## Upgrade compatibility
 
 - NSIS keeps the original `...\Uninstall\RackTop` and `Software\racktop\RackTop`

@@ -108,6 +108,18 @@
 .training-snapshot-note { display: flex; align-items: flex-start; gap: 5px; margin: 9px 0; color: var(--orange); font-size: calc(10px + var(--font-adjust, 0px)); line-height: 1.6; }
 .training-snapshot-note svg { flex: none; margin-top: 2px; }
 .training-gpu-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; max-height: 260px; overflow-y: auto; padding: 2px; margin: -2px; }
+.training-fleet { display: grid; align-content: start; gap: 14px; max-height: 440px; overflow-y: auto; overscroll-behavior: contain; padding: 3px; margin: -3px; scrollbar-gutter: stable; }
+.training-fleet__server { min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.training-fleet__server.is-selected { border-color: color-mix(in srgb, var(--blue) 45%, var(--border)); }
+.training-fleet__server > header, .training-fleet__server > header > div { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.training-fleet__server > header { justify-content: space-between; }
+.training-fleet__server > header strong { overflow-wrap: anywhere; font-size: calc(12px + var(--font-adjust, 0px)); }
+.training-fleet__server > header svg { flex: none; color: var(--text-tertiary); }
+.training-fleet__server > header span { flex: none; color: var(--blue); font-size: calc(9px + var(--font-adjust, 0px)); }
+.training-fleet__server > header small { flex: none; color: var(--text-tertiary); font-size: calc(9px + var(--font-adjust, 0px)); }
+.training-fleet__address, .training-fleet__empty { margin: 6px 0 10px; color: var(--text-tertiary); font-size: calc(9px + var(--font-adjust, 0px)); overflow-wrap: anywhere; line-height: 1.6; }
+.training-fleet__empty { margin-bottom: 0; }
+.training-fleet .training-gpu-grid { max-height: none; overflow: visible; }
 .training-gpu { display: flex; min-width: 0; align-items: flex-start; gap: 8px; padding: 11px 9px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface-subtle); cursor: pointer; transition: border-color 140ms ease, background-color 140ms ease; }
 .training-gpu.is-selected { border-color: var(--blue); background: color-mix(in srgb, var(--blue) 5%, var(--surface-solid)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--blue) 12%, transparent); }
 .training-gpu > input { width: 13px; height: 13px; flex: none; margin: 1px 0 0; accent-color: var(--blue); }

@@ -1240,7 +1240,7 @@ mod tray_image_tests {
     use super::render_tray_image;
 
     #[test]
-    fn tray_assets_have_transparent_edges_and_a_real_wave_cutout() {
+    fn tray_assets_have_transparent_edges_and_a_dumbbell_cutout() {
         let mask = include_bytes!("../icons/tray/macos-template.rgba");
         let color = include_bytes!("../icons/tray/color.rgba");
         assert_eq!(mask.len(), 36 * 36 * 4);
@@ -1248,7 +1248,9 @@ mod tray_image_tests {
         let alpha = |x: usize, y: usize| mask[(y * 36 + x) * 4 + 3];
         assert_eq!(alpha(0, 0), 0);
         assert_eq!(alpha(9, 9), 255);
-        assert_eq!(alpha(9, 19), 0, "wave must expose the background");
+        assert_eq!(alpha(18, 18), 0, "dumbbell bar must expose the background");
+        assert_eq!(alpha(9, 18), 255, "blue backplate keeps its template silhouette");
+        assert_eq!(&color[(18 * 36 + 18) * 4..(18 * 36 + 18) * 4 + 3], &[255; 3]);
         assert_eq!(color[3], 0, "no white border outside the logo");
         assert!(color.chunks_exact(4).any(|p| p[3] > 200 && p[2] > p[0]));
     }

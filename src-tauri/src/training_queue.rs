@@ -22,7 +22,7 @@ fn default_interpreter() -> String {
     "python -u".into()
 }
 fn default_config_mode() -> String {
-    "flag".into()
+    "positional".into()
 }
 fn default_config_flag() -> String {
     "--config".into()
@@ -615,6 +615,14 @@ mod tests {
     use super::*;
     fn profile() -> TrainingProfile {
         serde_json::from_value(json!({"id":"12345678-1234-4234-8234-123456789abc","name":"训练","serverId":"s1","workingDirectory":"/data/train","interpreter":"python -u","scriptPath":"train.py","configPath":"config.yaml","configMode":"flag","configFlag":"--config","extraArguments":"","gpuUuids":["GPU-a"],"minimumFreeMemoryGb":8})).unwrap()
+    }
+    #[test]
+    fn missing_config_mode_defaults_to_positional_and_explicit_flag_is_preserved() {
+        let mut value = serde_json::to_value(profile()).unwrap();
+        value.as_object_mut().unwrap().remove("configMode");
+        let defaulted: TrainingProfile = serde_json::from_value(value).unwrap();
+        assert_eq!(defaulted.config_mode, "positional");
+        assert_eq!(profile().config_mode, "flag");
     }
     #[test]
     fn local_profiles_and_remote_cache_survive_reopen_without_touching_main_database() {

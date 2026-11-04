@@ -51,11 +51,73 @@ afterEach(() => {
 })
 
 describe('TrainingView submission and queue confirmation', () => {
+  it('defaults new training to positional config and follows server Conda defaults', async () => {
+    const training21 = { ...server, id: '21', name: '21', host: '192.168.0.21' }
+    const training22 = { ...server, id: '22', name: '22', host: '192.168.0.22' }
+    await act(async () => root.render(<TrainingView servers={[training21, training22]} snapshots={{}} onNotice={vi.fn()} />))
+    await act(async () => button('新建训练').click())
+    const prefix = container.querySelector<HTMLInputElement>('input[placeholder="python -u / conda run -n train python / torchrun"]')!
+    expect(prefix.value).toBe('/home/alice/miniconda3/envs/torch29-cu130/bin/python')
+    expect(container.querySelector<HTMLInputElement>('input[type="radio"]:checked')?.parentElement?.textContent).toContain('位置式')
+    const select = container.querySelector<HTMLSelectElement>('select')!
+    await act(async () => { select.value = training22.id; select.dispatchEvent(new Event('change', { bubbles: true })) })
+    expect(prefix.value).toBe('/home/alice/miniconda3/envs/deploy/bin/python')
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(prefix, 'torchrun --nproc_per_node=2')
+      prefix.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { select.value = training21.id; select.dispatchEvent(new Event('change', { bubbles: true })) })
+    expect(prefix.value).toBe('torchrun --nproc_per_node=2')
+  })
+
+  it('shows every server GPU and switches the selected server when choosing a GPU there', async () => {
+    const other = { ...server, id: '22', name: '22', host: '192.168.0.22' }
+    const offline = { ...server, id: 'offline', name: 'Offline server', status: 'offline' as const }
+    const stale = { ...server, id: 'stale', name: 'Stale server' }
+    const allSnapshots = {
+      [server.id]: snapshot,
+      [other.id]: { ...snapshot, serverId: other.id },
+      [offline.id]: { ...snapshot, serverId: offline.id, status: 'offline' as const },
+      [stale.id]: { ...snapshot, serverId: stale.id, timestamp: 1 },
+    }
+    await act(async () => root.render(<TrainingView servers={[server, other, offline, stale]} snapshots={allSnapshots} onNotice={vi.fn()} />))
+    await openSavedProfile()
+    const overview = container.querySelector('[aria-label="所有服务器 GPU 状态"]')!
+    expect(overview.querySelectorAll('input[type="checkbox"]')).toHaveLength(8)
+    expect(overview.querySelector('[aria-label="Offline server GPU 状态"]')?.textContent).toContain('离线')
+    expect(overview.querySelector('[aria-label="Stale server GPU 状态"]')?.textContent).toContain('已过期')
+    expect(overview.querySelector('[aria-label="Stale server GPU 状态"]')?.textContent).not.toContain('当前空闲')
+    await act(async () => overview.querySelector<HTMLInputElement>('input[aria-label="22 GPU 1 RTX 4090"]')!.click())
+    expect(container.querySelector<HTMLSelectElement>('select')?.value).toBe(other.id)
+    expect(overview.querySelector<HTMLInputElement>('input[aria-label="Training server GPU 0 RTX 4090"]')?.checked).toBe(false)
+    expect(overview.querySelector<HTMLInputElement>('input[aria-label="22 GPU 1 RTX 4090"]')?.checked).toBe(true)
+    await act(async () => button('保存配置').click())
+    expect(trainingApi.saveProfile).toHaveBeenLastCalledWith(expect.objectContaining({ serverId: other.id, gpuUuids: ['GPU-1'], interpreter: '/home/alice/miniconda3/envs/deploy/bin/python' }))
+  })
+
+  it('uses freshly checked GPUs without a monitor snapshot and invalidates checks after editing paths', async () => {
+    vi.spyOn(trainingApi, 'checkPaths').mockResolvedValue({ ok: true, workingDirectoryExists: true, scriptExists: true, configExists: true, pythonAvailable: true, nvidiaSmiAvailable: true, gpus: [{ ...gpu, utilization: 0, memoryUsedMb: 0, computeProcessCount: 0, eligible: true, reasons: [] }], commandPreview: '', message: '路径与环境检查通过' })
+    await act(async () => root.render(<TrainingView servers={[server]} snapshots={{}} onNotice={vi.fn()} />))
+    await openSavedProfile()
+    await act(async () => button('检查路径与环境').click())
+    const overview = container.querySelector('[aria-label="所有服务器 GPU 状态"]')!
+    expect(overview.textContent).toContain('当前空闲')
+    expect(overview.textContent).not.toContain('等待服务器 GPU 数据')
+    await act(async () => overview.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click())
+    expect(container.querySelector('[role="status"]')?.textContent).toBe('路径与环境检查通过')
+    const directory = container.querySelector<HTMLInputElement>('input[placeholder="/home/user/projects/my-model"]')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(directory, '/another/project')
+      directory.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(container.querySelector('[role="status"]')).toBeNull()
+  })
+
   it('shows busy GPU checkboxes and does not submit a queue until the explicit second confirmation', async () => {
     const submit = vi.spyOn(trainingApi, 'submit').mockResolvedValueOnce({ job: null, requiresQueueConfirmation: true, reasons: ['GPU 0 存在计算进程'] }).mockImplementationOnce(async (id) => ({ job: { ...job, id }, requiresQueueConfirmation: false, reasons: [] }))
     await render()
     await openSavedProfile()
-    const busyGpu = container.querySelector<HTMLInputElement>('input[aria-label="GPU 0 RTX 4090"]')
+    const busyGpu = container.querySelector<HTMLInputElement>('input[aria-label="Training server GPU 0 RTX 4090"]')
     expect(busyGpu).not.toBeNull()
     expect(busyGpu?.disabled).toBe(false)
     expect(busyGpu?.checked).toBe(true)
@@ -150,7 +212,7 @@ describe('TrainingView submission and queue confirmation', () => {
 
   it('saves a reusable script configuration before GPUs are selected', async () => {
     await render(); await openSavedProfile()
-    await act(async () => container.querySelector<HTMLInputElement>('input[aria-label="GPU 0 RTX 4090"]')?.click())
+    await act(async () => container.querySelector<HTMLInputElement>('input[aria-label="Training server GPU 0 RTX 4090"]')?.click())
     await act(async () => button('保存配置').click())
     expect(trainingApi.saveProfile).toHaveBeenCalledWith(expect.objectContaining({ gpuUuids: [], scriptPath: profile.scriptPath, configPath: profile.configPath }))
   })

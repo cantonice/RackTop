@@ -1,5 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <defs><linearGradient id="g" x1="8" y1="4" x2="56" y2="60"><stop stop-color="#35a7ff"/><stop offset="1" stop-color="#0060d7"/></linearGradient></defs>
-  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#g)"/>
-  <path d="M12 35h9l5-16 8 27 6-19 4 8h8" fill="none" stroke="#fff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>ModelGym</title>
+  <defs>
+    <linearGradient id="background" x1="120" y1="80" x2="880" y2="940" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3297ff"/>
+      <stop offset="1" stop-color="#0062d5"/>
+    </linearGradient>
+  </defs>
+  <rect x="72" y="72" width="880" height="880" rx="247.5" fill="url(#background)"/>
+  <!-- Lucide Dumbbell (ISC), matching the 18px / 2.4px sidebar mark. -->
+  <g transform="translate(264.5 264.5) scale(20.625)" fill="none" stroke="white" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14.4 14.4 9.6 9.6"/>
+    <path d="M18.657 21.485a2 2 0 1 1-2.829-2.828l-1.767 1.768a2 2 0 1 1-2.829-2.829l6.364-6.364a2 2 0 1 1 2.829 2.829l-1.768 1.767a2 2 0 1 1 2.828 2.829z"/>
+    <path d="m21.5 21.5-1.4-1.4"/>
+    <path d="M3.9 3.9 2.5 2.5"/>
+    <path d="M6.404 12.768a2 2 0 1 1-2.829-2.829l1.768-1.767a2 2 0 1 1-2.828-2.829l2.828-2.828a2 2 0 1 1 2.829 2.828l1.767-1.768a2 2 0 1 1 2.829 2.829z"/>
+  </g>
 </svg>

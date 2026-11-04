@@ -1,9 +1,44 @@
 import { describe, expect, it } from 'vitest'
-import type { Snapshot } from '../types/models'
+import type { Server, Snapshot } from '../types/models'
 import type { TrainingProfile } from '../types/training'
-import { trainingCommandPreview, trainingGpuFromSnapshot, validateTrainingProfile } from './training'
+import { defaultTrainingInterpreter, trainingCommandPreview, trainingGpuFromSnapshot, trainingServerChange, validateTrainingProfile } from './training'
 
 const profile: TrainingProfile = { id: 'profile', name: 'Model training', serverId: 'server', workingDirectory: '/work/my model', interpreter: 'conda run -n train python -u', scriptPath: "scripts/train's model.py", configPath: 'configs/base config.yaml', configMode: 'flag', configFlag: '--config', extraArguments: '--epochs 20 --label "baseline run"', gpuUuids: ['GPU-0'], minimumFreeMemoryGb: 8 }
+
+function server(number: number, username = 'zhouzhen'): Server {
+  return { id: `server-${number}`, name: String(number), host: `192.168.0.${number}`, port: 22, username, tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, authMethod: 'sshAgent', status: 'online' }
+}
+
+describe('training server defaults', () => {
+  it.each([20, 21, 23])('uses the CUDA 13 training environment on server %s', (number) => {
+    expect(defaultTrainingInterpreter(server(number))).toBe('/home/zhouzhen/miniconda3/envs/torch29-cu130/bin/python')
+  })
+
+  it.each([22, 26, 27, 28])('uses the deploy environment on server %s', (number) => {
+    expect(defaultTrainingInterpreter(server(number, 'alice'))).toBe('/home/alice/miniconda3/envs/deploy/bin/python')
+  })
+
+  it('supports numbered SSH aliases and display names without matching unrelated host numbers', () => {
+    expect(defaultTrainingInterpreter({ ...server(21), host: 'training.internal', name: '训练服务器21' })).toContain('/torch29-cu130/')
+    expect(defaultTrainingInterpreter({ ...server(22), host: 'training.internal', name: 'Training', sshAlias: 'gpu-22' })).toContain('/deploy/')
+    expect(defaultTrainingInterpreter({ ...server(20), host: '192.168.0.120' })).toBe('python -u')
+    expect(defaultTrainingInterpreter(server(25))).toBe('python -u')
+    expect(defaultTrainingInterpreter(undefined)).toBe('python -u')
+    expect(defaultTrainingInterpreter(server(21, ''))).toBe('python -u')
+  })
+
+  it('updates automatic prefixes and clears GPU selection when switching servers', () => {
+    const previous = server(21)
+    const next = server(22, 'alice')
+    expect(trainingServerChange({ ...profile, interpreter: defaultTrainingInterpreter(previous) }, previous, next)).toEqual({ serverId: next.id, gpuUuids: [], interpreter: '/home/alice/miniconda3/envs/deploy/bin/python' })
+    expect(trainingServerChange({ ...profile, interpreter: 'python -u' }, server(25), next).interpreter).toBe(defaultTrainingInterpreter(next))
+    expect(trainingServerChange({ ...profile, interpreter: '' }, previous, next).interpreter).toBe(defaultTrainingInterpreter(next))
+  })
+
+  it('preserves a custom launch prefix when switching servers', () => {
+    expect(trainingServerChange(profile, server(21), server(22))).toMatchObject({ interpreter: profile.interpreter, gpuUuids: [] })
+  })
+})
 
 describe('training command and resource boundary', () => {
   it('quotes remote paths and supports named or positional config arguments', () => {

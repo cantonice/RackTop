@@ -148,7 +148,7 @@ def normalize_profile(value, require_gpus=False):
         "interpreter": text(value.get("interpreter"), "启动前缀", 4096),
         "scriptPath": text(value.get("scriptPath"), "训练脚本路径"),
         "configPath": text(value.get("configPath"), "配置文件路径"),
-        "configMode": value.get("configMode", "flag"),
+        "configMode": value.get("configMode", "positional"),
         "configFlag": text(value.get("configFlag", "--config"), "配置参数名", 100, True),
         "extraArguments": text(value.get("extraArguments", ""), "附加参数", 16384, True),
     }
@@ -572,9 +572,15 @@ def run_job(job_id):
         # Complete UUIDs bind training to the exact devices whose state we checked.
         environment["CUDA_VISIBLE_DEVICES"] = ",".join(job["gpuUuids"])
         environment["PYTHONUNBUFFERED"] = "1"
+        arguments = command_argv(job["profile"])
+        # Record the actual launch context before project imports can fail.
+        # Absolute script paths do not change the configured working directory.
+        print("[ModelGym] 工作目录：" + working_directory, flush=True)
+        print("[ModelGym] 启动命令：" + command_preview(arguments), flush=True)
+        print("[ModelGym] CUDA_VISIBLE_DEVICES=" + environment["CUDA_VISIBLE_DEVICES"], flush=True)
         # Hold the cancellation lock through actual process creation.
         try:
-            process = subprocess.Popen(command_argv(job["profile"]), cwd=working_directory, env=environment, stdin=subprocess.DEVNULL, close_fds=True)
+            process = subprocess.Popen(arguments, cwd=working_directory, env=environment, stdin=subprocess.DEVNULL, close_fds=True)
         except OSError as error:
             job.update({"status": "failed", "endedAt": int(now()), "waitingReason": "无法启动训练程序：" + str(error)[:500]})
             save_job(job)
