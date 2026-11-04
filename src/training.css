@@ -77,6 +77,22 @@
 .training-editor { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 25px; }
 .training-editor__configuration { padding-right: 24px; border-right: 1px solid var(--border); }
 .training-editor__resources { display: grid; align-content: start; gap: 25px; }
+.training-datalist { margin-bottom: 22px; padding: 15px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-subtle); }
+.training-datalist > header { margin-bottom: 13px; }
+.training-datalist__hint { margin: 10px 0 0; color: var(--text-tertiary); font-size: calc(10px + var(--font-adjust, 0px)); line-height: 1.6; }
+.training-datalist pre { margin: 11px 0 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 7px; color: var(--text-secondary); background: var(--surface); font-size: calc(10px + var(--font-adjust, 0px)); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.training-job__datalist { margin: 7px 0 0; color: var(--text-secondary); font-size: calc(10px + var(--font-adjust, 0px)); }
+.training-job__datalist.is-running { color: var(--blue); }
+.training-job__datalist.is-completed { color: var(--green); }
+.training-job__datalist.is-failed { color: var(--red); }
+.training-completion-notice { position: fixed; right: 24px; bottom: 24px; z-index: 150; width: min(410px, calc(100vw - 32px)); padding: 18px; border: 1px solid var(--border-strong); border-radius: 12px; color: var(--text); background: var(--surface-solid); box-shadow: 0 12px 40px rgb(0 0 0 / 18%); }
+.training-completion-notice header { display: flex; align-items: center; gap: 9px; }
+.training-completion-notice header > svg { flex: none; color: var(--green); }
+.training-completion-notice.is-failed header > svg { color: var(--red); }
+.training-completion-notice header strong { flex: 1; font-size: calc(14px + var(--font-adjust, 0px)); }
+.training-completion-notice > p { margin: 12px 0 8px; font-size: calc(12px + var(--font-adjust, 0px)); line-height: 1.7; overflow-wrap: anywhere; user-select: text; }
+.training-completion-notice > small { color: var(--text-tertiary); font-size: calc(10px + var(--font-adjust, 0px)); }
+.training-completion-notice footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .training-form-section > header { display: flex; align-items: flex-start; gap: 9px; margin-bottom: 16px; }
 .training-form-section > header > span { display: grid; place-items: center; width: 22px; height: 22px; flex: none; border: 1px solid color-mix(in srgb, var(--blue) 19%, transparent); border-radius: 7px; color: var(--blue); background: color-mix(in srgb, var(--blue) 6%, transparent); font-size: 11px; font-weight: 650; }
 .training-form-section h3 { margin: 2px 0 0; font-size: calc(13px + var(--font-adjust, 0px)); font-weight: 650; }

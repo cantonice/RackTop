@@ -84,6 +84,8 @@ import { SshTerminal } from './components/SshTerminal'
 import { StatusPill } from './components/StatusPill'
 import { TrendChart } from './components/TrendChart'
 import { TrainingView } from './components/TrainingView'
+import { TrainingCompletionNotice } from './components/TrainingCompletionNotice'
+import { useTrainingCompletionNotifications } from './hooks/useTrainingCompletionNotifications'
 import { UsageDistribution } from './components/UsageDistribution'
 import { aggregateGpuMemoryPercent, aggregateGpuSmUtilization, clampPercent, countOtherUserGpuWorkloads, displayedGpuMemoryPercent, gpuLoadAccent, gpuLoadLevel, gpuMemoryLevel, gpuMemoryPercent, isGpuAvailable, isGpuIdle } from './utils/gpu'
 import { canDisplayServerDetails, offlineFailureThreshold, serverStatusAfterSyncAwareFailure, shouldShowConnectingOnAttempt } from './utils/connectionStatus'
@@ -357,6 +359,8 @@ function App() {
   const [importingConfig, setImportingConfig] = useState(false)
   const [importDrafts, setImportDrafts] = useState<ServerDraft[] | null>(null)
   const [mainView, setMainView] = useState<'server' | 'fleet' | 'idle' | 'mine' | 'projects' | 'training'>(() => browserPreviewState === 'training' ? 'training' : browserPreviewState === 'terminal' || browserPreviewState === 'reconnecting' || browserPreviewState === 'notifications' ? 'server' : 'fleet')
+  const trainingCompletions = useTrainingCompletionNotifications(settings !== null)
+  const [trainingCompletionJobId, setTrainingCompletionJobId] = useState<string | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
   const [projectEditor, setProjectEditor] = useState<Project | null | 'new'>(null)
   const [projectPendingDelete, setProjectPendingDelete] = useState<Project | null>(null)
@@ -977,6 +981,12 @@ function App() {
 
   useEffect(() => {
     const unlisten = api.onNotificationAction((extra) => {
+      if (extra.kind === 'training') {
+        setTrainingCompletionJobId(typeof extra.jobId === 'string' ? extra.jobId : null)
+        setMainView('training')
+        if (api.isDesktop) { void getCurrentWindow().show(); void getCurrentWindow().setFocus() }
+        return
+      }
       const serverId = typeof extra.serverId === 'string' ? extra.serverId : null
       const gpuUuid = typeof extra.gpuUuid === 'string' ? extra.gpuUuid : null
       if (!serverId || !gpuUuid) return
@@ -1797,7 +1807,7 @@ function App() {
 
         <div className={`workspace__scroll ${showTerminal ? 'workspace__scroll--terminal' : ''}`}>
           {mainView === 'training' ? (
-            <TrainingView servers={servers} snapshots={snapshots} onNotice={setToast} onRefreshServer={(serverId) => refreshServer(serverId)} />
+            <TrainingView servers={servers} snapshots={snapshots} onNotice={setToast} onRefreshServer={(serverId) => refreshServer(serverId)} onJobAccepted={trainingCompletions.observeJob} completionJobId={trainingCompletionJobId} />
           ) : shouldShowGuidedEmptyState(mainView, servers.length) ? (
             <EmptyState onboarding={<OnboardingChecklist steps={onboardingSteps} previewStep={onboardingPreviewStep} collapsed={onboardingCollapsed} dismissed={onboardingDismissed} useActualState={onboardingUseActualState} showPreviewControls={!api.isDesktop} onPreviewStepChange={setOnboardingPreviewStep} onCollapsedChange={setOnboardingCollapsed} onDismiss={() => { localStorage.setItem(ONBOARDING_DISMISSED_KEY, 'true'); setOnboardingDismissed(true); setToast('已隐藏新手引导，可在“设置 → 通用”中重新显示') }} onUseActualStateChange={setOnboardingUseActualState} />} onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
           ) : servers.length === 0 ? (
@@ -1873,6 +1883,7 @@ function App() {
       {reservationEditor && <IdleReservationSheet reservation={reservationEditor.reservation} filters={reservationEditor.filters} availableGpuKeys={reservationEditorItems.filter((item) => item.available).map(({ server, gpu }) => idleReservationGpuKey(server.id, gpu.uuid))} onClose={() => setReservationEditor(null)} onSave={saveIdleReservation} />}
       {showReservationCenter && <IdleReservationCenter reservations={idleReservations} warnings={gpuMemoryStallWarnings} onClose={() => setShowReservationCenter(false)} onEdit={(reservation) => { setShowReservationCenter(false); setReservationEditor({ filters: reservation.filters, reservation }) }} onStatusChange={setIdleReservationStatus} onClearPending={clearReservationPending} onDelete={removeIdleReservation} onIgnoreWarning={ignoreGpuMemoryStallWarning} />}
       {quickTerminal && (() => { const accelerator = snapshots[quickTerminal.server.id] ? acceleratorLabel(snapshots[quickTerminal.server.id]) : 'GPU'; return <div className="scrim quick-terminal-scrim" onMouseDown={(event) => event.target === event.currentTarget && setQuickTerminal(null)}><section className="sheet quick-terminal-sheet" role="dialog" aria-modal="true" aria-label={`${quickTerminal.server.name}${quickTerminal.gpu ? ` ${accelerator} ${quickTerminal.gpu.index}` : ''} 终端`}><header className="sheet__header"><div><p className="eyebrow">{quickTerminal.gpu ? `${accelerator} 固定终端` : 'SSH 终端'}</p><h2>{quickTerminal.server.name}{quickTerminal.gpu ? ` · ${accelerator} ${quickTerminal.gpu.index}` : ''}</h2></div><button className="icon-button" onClick={() => setQuickTerminal(null)} aria-label="关闭"><X size={18} /></button></header><SshTerminal serverId={quickTerminal.server.id} serverName={quickTerminal.server.name} gpuIndex={quickTerminal.gpu?.index} acceleratorVendor={snapshots[quickTerminal.server.id]?.acceleratorVendor} onNotice={setToast} /></section></div> })()}
+      {trainingCompletions.alerts[0] && <TrainingCompletionNotice alert={trainingCompletions.alerts[0]} remaining={trainingCompletions.alerts.length} serverName={servers.find((server) => server.id === trainingCompletions.alerts[0].job.serverId)?.name ?? '服务器已移除'} onDismiss={() => trainingCompletions.dismiss(trainingCompletions.alerts[0].id)} onView={() => { setTrainingCompletionJobId(trainingCompletions.alerts[0].job.id); trainingCompletions.dismiss(trainingCompletions.alerts[0].id); setMainView('training') }} />}
       {toast && <div className="toast" role="status"><AlertCircle size={17} /><span>{toast}</span><button onClick={() => setToast(null)} aria-label="关闭"><X size={14} /></button></div>}
       {zoomNotice !== null && api.isDesktop && <div className="zoom-pill" role="status" aria-live="polite"><span>{Math.round(zoomNotice * 100)}%</span><button type="button" onClick={() => zoomAdjustRef.current(-0.05)} aria-label="缩小">−</button><button type="button" onClick={() => zoomAdjustRef.current(0.05)} aria-label="放大">+</button><button type="button" onClick={() => { zoomAdjustRef.current(1 - zoomNotice) }} aria-label="重置缩放">重置</button></div>}
     </div>

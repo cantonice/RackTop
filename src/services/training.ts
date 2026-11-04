@@ -53,6 +53,13 @@ export function trainingCommandPreview(profile: TrainingProfile): string {
   return `cd -- ${shellQuote(profile.workingDirectory.trim())}\nCUDA_VISIBLE_DEVICES=${shellQuote(profile.gpuUuids.join(','))} ${command}`
 }
 
+export function datalistCommandPreview(profile: TrainingProfile): string {
+  const script = profile.datalistScriptPath?.trim()
+  if (!script) return ''
+  const command = [profile.interpreter.trim(), shellQuote(script), profile.datalistArguments?.trim()].filter(Boolean).join(' ')
+  return `cd -- ${shellQuote(profile.workingDirectory.trim())}\nCUDA_VISIBLE_DEVICES='' ${command}`
+}
+
 export function validateTrainingProfile(profile: TrainingProfile, requireGpu = true): string | null {
   if (!profile.name.trim()) return '请填写训练名称。'
   if (!profile.serverId) return '请选择训练服务器。'
@@ -60,12 +67,15 @@ export function validateTrainingProfile(profile: TrainingProfile, requireGpu = t
   if (!profile.interpreter.trim()) return '请填写 Python、Conda 或 torchrun 启动前缀。'
   if (!profile.scriptPath.trim()) return '请填写服务器上的训练脚本路径。'
   if (!profile.configPath.trim()) return '请填写服务器上的配置文件路径。'
+  if (!profile.datalistScriptPath?.trim() && profile.datalistArguments?.trim()) return '请填写 datalist 生成脚本，或清空生成脚本参数。'
+  if (new TextEncoder().encode(profile.datalistScriptPath ?? '').byteLength > 4096 || new TextEncoder().encode(profile.datalistArguments ?? '').byteLength > 16384) return 'datalist 生成脚本路径或参数过长。'
+  if (/[\r\n]/.test(profile.datalistScriptPath ?? '')) return 'datalist 生成脚本路径不能包含换行。'
   if (profile.configMode === 'flag' && !/^--?[A-Za-z][A-Za-z0-9_-]*$/.test(profile.configFlag.trim())) return '配置参数名应为 --config、--cfg 或 -c 这样的参数。'
   if (!Number.isFinite(profile.minimumFreeMemoryGb) || profile.minimumFreeMemoryGb < 0) return '最低空闲显存必须是大于或等于 0 的数字。'
   if (requireGpu && profile.gpuUuids.length === 0) return '请至少选择一张 GPU。'
   if (new Set(profile.gpuUuids).size !== profile.gpuUuids.length) return 'GPU 选择重复，请重新选择。'
-  if ([profile.name, profile.workingDirectory, profile.interpreter, profile.scriptPath, profile.configPath, profile.extraArguments].some((value) => value.includes('\0'))) return '训练配置不能包含空字符。'
-  if ([profile.interpreter, profile.extraArguments].some((value) => /[\r\n]/.test(value))) return '启动前缀和附加参数请写在同一行，不支持 shell 脚本。'
+  if ([profile.name, profile.workingDirectory, profile.interpreter, profile.scriptPath, profile.configPath, profile.extraArguments, profile.datalistScriptPath ?? '', profile.datalistArguments ?? ''].some((value) => value.includes('\0'))) return '训练配置不能包含空字符。'
+  if ([profile.interpreter, profile.extraArguments, profile.datalistArguments ?? ''].some((value) => /[\r\n]/.test(value))) return '启动前缀和附加参数请写在同一行，不支持 shell 脚本。'
   return null
 }
 
@@ -73,13 +83,19 @@ export function trainingGpuFromSnapshot(snapshot: Snapshot, minimumFreeMemoryGb:
   return snapshot.gpus.map((gpu) => {
     const computeProcessCount = snapshot.processes.filter((process) => process.gpuUuid === gpu.uuid).length
     const reasons: string[] = []
-    if (gpu.uuid.startsWith('unavailable-') || gpu.memoryTotalMb <= 0 || !Number.isFinite(gpu.utilization)) reasons.push('GPU 指标不可读')
-    if (!snapshot.processesSampled) reasons.push('等待完整进程采样')
-    if (computeProcessCount > 0) reasons.push(`${computeProcessCount} 个计算进程`)
-    if (gpu.utilization > 10) reasons.push(`利用率 ${Math.round(gpu.utilization)}% > 10%`)
-    if ((gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024 < minimumFreeMemoryGb) reasons.push(`空闲显存不足 ${minimumFreeMemoryGb} GB`)
+    if (gpu.uuid.startsWith('unavailable-') || !Number.isFinite(gpu.memoryTotalMb) || gpu.memoryTotalMb <= 0 || !Number.isFinite(gpu.memoryUsedMb) || gpu.memoryUsedMb < 0 || gpu.memoryUsedMb > gpu.memoryTotalMb) reasons.push('GPU 显存指标不可读')
+    if ((gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024 <= minimumFreeMemoryGb) reasons.push(`空闲显存须大于 ${minimumFreeMemoryGb} GB`)
     return { ...gpu, computeProcessCount, eligible: reasons.length === 0, reasons }
   })
+}
+
+function trainingQueueReasons(gpu: TrainingGpu, minimum: number): string[] {
+  const reasons: string[] = []
+  if (gpu.uuid.startsWith('unavailable-') || !Number.isFinite(gpu.memoryTotalMb) || gpu.memoryTotalMb <= 0 || !Number.isFinite(gpu.memoryUsedMb) || !Number.isFinite(gpu.utilization)) reasons.push('GPU 指标不可读')
+  if (gpu.computeProcessCount > 0) reasons.push('存在计算进程')
+  if (gpu.utilization > 10) reasons.push('利用率超过 10%')
+  if ((gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024 < minimum) reasons.push(`空闲显存不足 ${minimum} GB`)
+  return reasons
 }
 
 export function trainingSnapshotIssue(server: Server | undefined, snapshot: Snapshot | undefined, checkedAt?: number): string | null {
@@ -111,7 +127,7 @@ export const trainingApi = {
     const snapshots = await api.listLatestSnapshots()
     const snapshot = snapshots.find((item) => item.serverId === profile.serverId)
     const gpus = snapshot ? trainingGpuFromSnapshot(snapshot, profile.minimumFreeMemoryGb) : []
-    return { ok: true, workingDirectoryExists: true, scriptExists: true, configExists: true, pythonAvailable: true, nvidiaSmiAvailable: true, gpus, commandPreview: trainingCommandPreview(profile), message: '浏览器演示：路径与环境检查已模拟通过，未连接真实服务器。' }
+    return { ok: true, workingDirectoryExists: true, scriptExists: true, configExists: true, datalistScriptExists: true, pythonAvailable: true, nvidiaSmiAvailable: true, gpus, commandPreview: trainingCommandPreview(profile), message: '浏览器演示：路径与环境检查已模拟通过，未连接真实服务器。' }
   },
   async submit(jobId: string, profile: TrainingProfile, queueIfBusy: boolean): Promise<TrainingSubmitResult> {
     if (api.isDesktop) return invoke('training_submit', { jobId, profile, queueIfBusy })
@@ -119,11 +135,13 @@ export const trainingApi = {
     if (existing) return { job: existing, requiresQueueConfirmation: false, reasons: [] }
     const check = await this.checkPaths(profile)
     const selected = check.gpus.filter((gpu) => profile.gpuUuids.includes(gpu.uuid))
-    const reasons = selected.flatMap((gpu) => gpu.reasons.map((reason) => `GPU ${gpu.index}：${reason}`))
+    const reasons = selected.flatMap((gpu) => trainingQueueReasons(gpu, profile.minimumFreeMemoryGb).map((reason) => `GPU ${gpu.index}：${reason}`))
     if (selected.length !== profile.gpuUuids.length) reasons.push('所选 GPU 不在当前快照中')
     if (reasons.length && !queueIfBusy) return { job: null, requiresQueueConfirmation: true, reasons }
     const now = Math.floor(Date.now() / 1000)
-    const job: TrainingJob = { id: jobId, profileId: profile.id, profile: structuredClone(profile), name: profile.name, serverId: profile.serverId, gpuUuids: [...profile.gpuUuids], gpuIndices: selected.map((gpu) => gpu.index), command: check.commandPreview, status: reasons.length ? 'queued' : 'stabilizing', waitingReason: reasons.length ? reasons.join('；') : '浏览器演示：等待连续空闲 30 秒，不会实际启动训练。', createdAt: now, pid: null, logPath: `~/.racktop/modelgym-training/jobs/${jobId}/output.log` }
+    const hasDatalist = Boolean(profile.datalistScriptPath?.trim())
+    const waitingReason = hasDatalist ? `浏览器演示：datalist 脚本仅预览，未实际运行。${reasons.join('；')}` : reasons.length ? reasons.join('；') : '浏览器演示：等待连续空闲 30 秒，不会实际启动训练。'
+    const job: TrainingJob = { id: jobId, profileId: profile.id, profile: structuredClone(profile), name: profile.name, serverId: profile.serverId, gpuUuids: [...profile.gpuUuids], gpuIndices: selected.map((gpu) => gpu.index), command: check.commandPreview, status: reasons.length || hasDatalist ? 'queued' : 'stabilizing', datalistStatus: hasDatalist ? 'pending' : null, waitingReason, createdAt: now, pid: null, logPath: `~/.racktop/modelgym-training/jobs/${jobId}/output.log` }
     writePreview(JOB_KEY, [job, ...readPreview<TrainingJob>(JOB_KEY)])
     return { job, requiresQueueConfirmation: false, reasons: [] }
   },

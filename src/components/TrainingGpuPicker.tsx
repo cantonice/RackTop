@@ -28,11 +28,11 @@ export function TrainingGpuPicker({ servers, snapshots, serverId, gpuUuids, sele
         <div className="training-gpu-grid" aria-label={`${server.name} 选择训练 GPU`}>{gpus.map((gpu) => {
           const checked = selected && gpuUuids.includes(gpu.uuid)
           const available = gpu.eligible && !issue
-          const readable = gpu.memoryTotalMb > 0 && Number.isFinite(gpu.utilization)
+          const readable = Number.isFinite(gpu.memoryTotalMb) && gpu.memoryTotalMb > 0 && Number.isFinite(gpu.memoryUsedMb) && gpu.memoryUsedMb >= 0 && gpu.memoryUsedMb <= gpu.memoryTotalMb
           return <label className={`training-gpu${checked ? ' is-selected' : ''}${!available ? ' is-busy' : ''}`} key={gpu.uuid}>
             <input type="checkbox" checked={checked} aria-label={`${server.name} GPU ${gpu.index} ${gpu.name}`} onChange={(event) => onSelect(server.id, gpu.uuid, event.target.checked)} />
             <div><strong>GPU {gpu.index}<span className={available ? 'is-free' : 'is-busy'}>{issue ? '待确认' : gpu.eligible ? '当前空闲' : '需等待'}</span></strong><small title={gpu.name}>{gpu.name}</small>
-              <p>{readable ? <><b>{Math.max(0, (gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024).toFixed(1)}</b> / {(gpu.memoryTotalMb / 1024).toFixed(1)} GB 可用<em>利用率 {Math.round(gpu.utilization)}% · {gpu.computeProcessCount} 个计算进程</em></> : 'GPU 指标不可读'}</p>
+              <p>{readable ? <><b>{Math.max(0, (gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024).toFixed(1)}</b> / {(gpu.memoryTotalMb / 1024).toFixed(1)} GB 可用<em>利用率 {Number.isFinite(gpu.utilization) ? `${Math.round(gpu.utilization)}%` : '—'} · {snapshot && !snapshot.processesSampled && !(selected && selectedGpuCheckedAt) ? '进程未采样' : `${gpu.computeProcessCount} 个计算进程`}</em></> : 'GPU 显存指标不可读'}</p>
               {gpu.reasons.length > 0 && <span className="training-gpu__reason">{gpu.reasons.join(' · ')}</span>}
             </div>
           </label>

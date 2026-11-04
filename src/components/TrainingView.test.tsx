@@ -51,11 +51,43 @@ afterEach(() => {
 })
 
 describe('TrainingView submission and queue confirmation', () => {
+  it('puts optional datalist generation first and saves its script, arguments and CPU command preview', async () => {
+    await render(); await openSavedProfile()
+    expect(container.querySelector('.training-sheet__body')?.firstElementChild?.getAttribute('aria-label')).toBe('生成 datalist 配置')
+    const script = container.querySelector<HTMLInputElement>('input[placeholder="tools/generate_datalist.py（可选）"]')!
+    const argumentsInput = container.querySelector<HTMLInputElement>('input[placeholder="--output data/train.txt"]')!
+    expect(script.value).toBe('')
+    expect(container.querySelector('[aria-label="datalist 生成命令"]')).toBeNull()
+    await act(async () => {
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+      setValue.call(script, 'tools/make_datalist.py'); script.dispatchEvent(new Event('input', { bubbles: true }))
+      setValue.call(argumentsInput, '--output "data/train list.txt"'); argumentsInput.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const preview = container.querySelector('[aria-label="datalist 生成命令"]')?.textContent ?? ''
+    expect(preview).toContain('CUDA_VISIBLE_DEVICES=')
+    expect(preview).toContain('tools/make_datalist.py')
+    expect(preview).not.toContain('GPU-0')
+    expect(preview).not.toContain('configs/train.yaml')
+    await act(async () => button('保存配置').click())
+    expect(trainingApi.saveProfile).toHaveBeenLastCalledWith(expect.objectContaining({ datalistScriptPath: 'tools/make_datalist.py', datalistArguments: '--output "data/train list.txt"' }))
+  })
+
+  it('shows datalist progress and explains cancellation also stops generation', async () => {
+    const generatingJob = { ...job, profile: { ...profile, datalistScriptPath: 'tools/data.py' }, datalistStatus: 'running' as const }
+    vi.mocked(trainingApi.listJobs).mockResolvedValue([generatingJob])
+    await render()
+    expect(container.textContent).toContain('正在生成 datalist')
+    await act(async () => button('取消排队').click())
+    expect(container.querySelector('[role="alertdialog"]')?.textContent).toContain('datalist 生成脚本及其子进程也会停止')
+    expect(trainingApi.cancelJob).not.toHaveBeenCalled()
+  })
+
   it('defaults new training to positional config and follows server Conda defaults', async () => {
     const training21 = { ...server, id: '21', name: '21', host: '192.168.0.21' }
     const training22 = { ...server, id: '22', name: '22', host: '192.168.0.22' }
     await act(async () => root.render(<TrainingView servers={[training21, training22]} snapshots={{}} onNotice={vi.fn()} />))
     await act(async () => button('新建训练').click())
+    expect(container.querySelector<HTMLInputElement>('input[type="number"]')?.value).toBe('10')
     const prefix = container.querySelector<HTMLInputElement>('input[placeholder="python -u / conda run -n train python / torchrun"]')!
     expect(prefix.value).toBe('/home/alice/miniconda3/envs/torch29-cu130/bin/python')
     expect(container.querySelector<HTMLInputElement>('input[type="radio"]:checked')?.parentElement?.textContent).toContain('位置式')

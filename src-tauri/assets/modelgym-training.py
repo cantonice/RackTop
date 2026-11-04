@@ -53,6 +53,7 @@ def stable_host_namespace(machine_identity=None, hostname=None):
 HOST_NAMESPACE = stable_host_namespace()
 STATE_DIR = Path.home() / ".racktop" / "modelgym-training" / "hosts" / HOST_NAMESPACE
 SCRIPT = Path(__file__).resolve()
+WORKER_VERSION = hashlib.sha256(SCRIPT.read_bytes()).hexdigest()
 STABLE_SECONDS = 30
 POLL_SECONDS = 2
 CANCEL_GRACE_SECONDS = 5
@@ -151,6 +152,8 @@ def normalize_profile(value, require_gpus=False):
         "configMode": value.get("configMode", "positional"),
         "configFlag": text(value.get("configFlag", "--config"), "配置参数名", 100, True),
         "extraArguments": text(value.get("extraArguments", ""), "附加参数", 16384, True),
+        "datalistScriptPath": text(value.get("datalistScriptPath", ""), "datalist 脚本路径", 4096, True),
+        "datalistArguments": text(value.get("datalistArguments", ""), "datalist 脚本参数", 16384, True),
     }
     if profile["configMode"] not in ("flag", "positional"):
         raise ValueError("配置文件传参方式无效")
@@ -162,7 +165,7 @@ def normalize_profile(value, require_gpus=False):
     if any(not isinstance(item, str) or not re.fullmatch(r"GPU-[A-Za-z0-9_-]+", item) for item in devices):
         raise ValueError("GPU UUID 无效；目前仅支持 NVIDIA 物理 GPU")
     profile["gpuUuids"] = devices
-    minimum = value.get("minimumFreeMemoryGb", 0)
+    minimum = value.get("minimumFreeMemoryGb", 10)
     if isinstance(minimum, bool) or not isinstance(minimum, (int, float)) or not math.isfinite(minimum) or not 0 <= minimum <= 100000:
         raise ValueError("每卡最低空闲显存必须为有效非负数")
     profile["minimumFreeMemoryGb"] = minimum
@@ -172,6 +175,9 @@ def normalize_profile(value, require_gpus=False):
             raise ValueError("训练配置时间无效")
         profile[field] = timestamp if timestamp is not None else int(now())
     command_argv(profile)  # Validate quoting and unsupported shell operations early.
+    if profile["datalistArguments"] and not profile["datalistScriptPath"]:
+        raise ValueError("填写 datalist 脚本参数时，请同时填写 datalist 脚本路径")
+    datalist_argv(profile)
     return profile
 
 
@@ -196,21 +202,33 @@ def split_arguments(value, label):
     return arguments
 
 
-def command_argv(profile):
+def command_prefix(profile):
     prefix = split_arguments(profile["interpreter"], "启动前缀")
     if not prefix:
         raise ValueError("启动前缀不能为空")
     if Path(prefix[0]).name in ("sh", "bash", "zsh", "dash", "fish", "nohup", "setsid"):
         raise ValueError("请使用 Python、conda run 或 torchrun 前缀；不支持后台包装或 shell 脚本前缀")
     prefix[0] = os.path.expanduser(prefix[0])
-    workdir, script, config = resolved_paths(profile)
+    workdir, _, _ = resolved_paths(profile)
     # Popen resolves relative executable paths after changing cwd. Resolve them
     # here too, so preflight and the preview use that same project environment.
     if os.sep in prefix[0] or (os.altsep and os.altsep in prefix[0]):
         executable = Path(prefix[0])
         if not executable.is_absolute():
             prefix[0] = str((Path(workdir) / executable).resolve())
-    return prefix + [script] + ([profile["configFlag"]] if profile["configMode"] == "flag" else []) + [config] + split_arguments(profile["extraArguments"], "附加参数")
+    return prefix
+
+
+def command_argv(profile):
+    _, script, config = resolved_paths(profile)
+    return command_prefix(profile) + [script] + ([profile["configFlag"]] if profile["configMode"] == "flag" else []) + [config] + split_arguments(profile["extraArguments"], "附加参数")
+
+
+def datalist_argv(profile):
+    if not profile.get("datalistScriptPath"):
+        return []
+    _, script, _ = resolved_paths(dict(profile, scriptPath=profile["datalistScriptPath"]))
+    return command_prefix(profile) + [script] + split_arguments(profile.get("datalistArguments", ""), "datalist 脚本参数")
 
 
 def command_preview(arguments):
@@ -286,6 +304,7 @@ def readiness(profile, devices, probe_error=None):
 
 def check_paths(profile):
     workdir, script, config = resolved_paths(profile)
+    datalist_script = resolved_paths(dict(profile, scriptPath=profile["datalistScriptPath"]))[1] if profile.get("datalistScriptPath") else None
     interpreter = command_argv(profile)[0]
     interpreter_available = bool(shutil.which(interpreter))
     result = {
@@ -295,9 +314,12 @@ def check_paths(profile):
         "pythonAvailable": sys.version_info >= (3, 8),
         "nvidiaSmiAvailable": bool(shutil.which("nvidia-smi")),
         "interpreterAvailable": interpreter_available,
+        "datalistScriptExists": datalist_script is None or (os.path.isfile(datalist_script) and os.access(datalist_script, os.R_OK)),
         "commandPreview": command_preview(command_argv(profile)),
     }
     issues = []
+    if not result["datalistScriptExists"]:
+        issues.append("远端 datalist 脚本不存在或不可读")
     for field, message in (("pythonAvailable", "远端需要 Python 3.8 或更新版本"), ("nvidiaSmiAvailable", "远端缺少 nvidia-smi"), ("workingDirectoryExists", "远端工作目录不存在"), ("scriptExists", "远端训练脚本不存在或不可读"), ("configExists", "远端配置文件不存在或不可读"), ("interpreterAvailable", "远端找不到启动程序；请使用 Python/Conda/torchrun 的绝对路径")):
         if not result[field]:
             issues.append(message)
@@ -338,6 +360,20 @@ def load_job(job_id):
         record = job.get("processIdentity")
         if record is not None and (not isinstance(record, dict) or record.get("pid") != job.get("pid") or not isinstance(record.get("startTicks"), str) or not record["startTicks"].isdigit() or not isinstance(record.get("bootId"), str)):
             raise ValueError("任务进程身份无效")
+        if profile["datalistScriptPath"]:
+            if job.get("datalistStatus") not in ("pending", "running", "completed", "failed"):
+                raise ValueError("datalist 生成状态无效")
+            for field in ("datalistStartedAt", "datalistEndedAt"):
+                value = job.get(field)
+                if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0):
+                    raise ValueError("datalist 生成时间无效")
+            pid, record = job.get("datalistPid"), job.get("datalistProcessIdentity")
+            if pid is not None and (type(pid) is not int or pid <= 0):
+                raise ValueError("datalist PID 无效")
+            if record is not None and (not isinstance(record, dict) or record.get("pid") != pid or not isinstance(record.get("startTicks"), str) or not record["startTicks"].isdigit() or not isinstance(record.get("bootId"), str)):
+                raise ValueError("datalist 进程身份无效")
+            if job.get("datalistStatus") == "running" and (pid is None or record is None):
+                raise ValueError("datalist 运行进程身份缺失")
         return job
     except (ValueError, TypeError, KeyError) as error:
         raise ValueError("训练任务状态损坏：%s；已暂停自动启动，请检查并恢复原记录，未覆盖任务数据（%s）" % (path, error)) from error
@@ -418,6 +454,18 @@ def signal_job(job, value):
 
 
 def reconcile(job, timestamp):
+    if job.get("datalistStatus") == "running":
+        stage = datalist_process(job)
+        alive = identity_alive(stage.get("processIdentity"))
+        descendants = [] if alive else owned_group_members(stage)
+        if job.get("cancelRequestedAt") is not None and timestamp - job["cancelRequestedAt"] >= CANCEL_GRACE_SECONDS:
+            signal_job(stage, KILL_SIGNAL)
+            alive = identity_alive(stage.get("processIdentity"))
+            descendants = [] if alive else owned_group_members(stage)
+        if not alive and not descendants:
+            cancelled = job.get("cancelRequestedAt") is not None
+            job.update({"status": "cancelled" if cancelled else "failed", "datalistStatus": "failed", "datalistEndedAt": int(timestamp), "endedAt": int(timestamp), "waitingReason": "datalist 生成已取消" if cancelled else "datalist 生成进程中断或服务器重启；未自动重新运行"})
+            save_job(job)
     if job["status"] != "running":
         return job
     alive = identity_alive(job.get("processIdentity"))
@@ -433,15 +481,33 @@ def reconcile(job, timestamp):
 
 
 def spec_hash(profile):
-    specification = {key: value for key, value in profile.items() if key not in ("createdAt", "updatedAt")}
+    # Empty optional fields were absent from profiles accepted by older workers.
+    specification = {key: value for key, value in profile.items() if key not in ("createdAt", "updatedAt") and not (key in ("datalistScriptPath", "datalistArguments") and not value)}
     return hashlib.sha256(json.dumps(specification, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 def ensure_daemon():
     record_path = STATE_DIR / "daemon.json"
+    version_path = STATE_DIR / "daemon-version.json"
     try:
-        if identity_alive(json.loads(record_path.read_text())):
-            return
+        previous = json.loads(record_path.read_text())
+        if identity_alive(previous):
+            try:
+                if json.loads(version_path.read_text()).get("workerSha256") == WORKER_VERSION:
+                    return
+            except (FileNotFoundError, ValueError, AttributeError):
+                pass
+            # Runners have independent sessions. Replace only the verified daemon
+            # PID so its old in-memory scheduler cannot skip the new prerequisite.
+            try:
+                os.kill(previous["pid"], signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 2
+            while identity_alive(previous) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            if identity_alive(previous):
+                raise RuntimeError("旧训练队列守护进程尚未退出，未启动新的调度器；请稍后重试")
     except (FileNotFoundError, ValueError, KeyError):
         pass
     with open(STATE_DIR / "daemon.log", "ab", buffering=0) as log:
@@ -450,6 +516,7 @@ def ensure_daemon():
     if not record:
         raise RuntimeError("远端队列守护进程启动失败；请检查 " + str(STATE_DIR / "daemon.log"))
     atomic_json(record_path, record)
+    atomic_json(version_path, {"workerSha256": WORKER_VERSION})
 
 
 def submit(job_id, profile, allow_queue):
@@ -461,6 +528,7 @@ def submit(job_id, profile, allow_queue):
                 raise ValueError("同一任务标识已绑定其他配置，不能修改后重复提交")
             if existing["status"] in ACTIVE:
                 ensure_daemon()
+                start_datalist(existing, now())
             return {"job": public_job(existing), "requiresQueueConfirmation": False, "reasons": []}
         report, issues, probe_error = check_paths(profile)
         if issues:
@@ -478,18 +546,43 @@ def submit(job_id, profile, allow_queue):
             raise ValueError("每台服务器最多保留 200 个未完成训练任务")
         timestamp = now()
         job = {"id": job_id, "profileId": profile["id"], "name": profile["name"], "serverId": profile["serverId"], "profile": profile, "gpuUuids": profile["gpuUuids"], "gpuIndices": [], "command": report["commandPreview"], "status": "queued" if reasons else "stabilizing", "waitingReason": "；".join(reasons) if reasons else "正在确认所有 GPU 连续空闲 30 秒", "createdAt": timestamp, "startedAt": None, "endedAt": None, "pid": None, "exitCode": None, "logPath": "~/.racktop/modelgym-training/hosts/" + HOST_NAMESPACE + "/jobs/" + job_id + "/output.log", "specHash": spec_hash(profile), "stableSince": None if reasons else timestamp, "lastProbeAt": timestamp, "processIdentity": None}
+        job.update({"datalistStatus": "pending" if profile.get("datalistScriptPath") else None, "datalistPid": None, "datalistProcessIdentity": None, "datalistExitCode": None, "datalistStartedAt": None, "datalistEndedAt": None})
         save_job(job)
         # A lost SSH reply may leave the accepted job here. Retrying the same id
         # returns this job instead of submitting another training process.
         ensure_daemon()
+        start_datalist(job, timestamp)
         return {"job": public_job(job), "requiresQueueConfirmation": False, "reasons": reasons}
 
 
 def public_job(job):
-    return {key: value for key, value in job.items() if key not in ("specHash", "stableSince", "lastProbeAt", "processIdentity", "cancelRequestedAt")}
+    return {key: value for key, value in job.items() if key not in ("specHash", "stableSince", "lastProbeAt", "processIdentity", "cancelRequestedAt", "datalistPid", "datalistProcessIdentity")}
+
+
+def datalist_process(job):
+    return {"id": job["id"], "pid": job.get("datalistPid"), "processIdentity": job.get("datalistProcessIdentity")}
+
+
+def start_datalist(job, timestamp):
+    if job.get("datalistStatus") != "pending" or job["status"] not in ("queued", "stabilizing"):
+        return
+    environment = os.environ.copy()
+    environment.update({"MODELGYM_JOB_ID": job["id"], "CUDA_VISIBLE_DEVICES": ""})
+    try:
+        with open(job_path(job["id"]).parent / "output.log", "ab", buffering=0) as output:
+            process = subprocess.Popen([sys.executable, str(SCRIPT), "datalist", job["id"], HOST_NAMESPACE], stdin=subprocess.DEVNULL, stdout=output, stderr=output, env=environment, start_new_session=True, close_fds=True)
+        record = identity(process.pid)
+        if not record:
+            raise RuntimeError("datalist 运行器未能启动")
+        job.update({"datalistStatus": "running", "datalistPid": process.pid, "datalistProcessIdentity": record, "datalistStartedAt": int(timestamp), "waitingReason": "正在生成 datalist；" + job["waitingReason"]})
+    except (OSError, RuntimeError) as error:
+        job.update({"status": "failed", "datalistStatus": "failed", "datalistEndedAt": int(timestamp), "endedAt": int(timestamp), "waitingReason": "无法启动 datalist 生成程序：" + str(error)[:500]})
+    save_job(job)
 
 
 def launch(job, devices, timestamp):
+    if job["profile"].get("datalistScriptPath") and job.get("datalistStatus") != "completed":
+        raise RuntimeError("datalist 尚未生成成功，不能启动训练")
     mapping = {gpu["uuid"]: gpu["index"] for gpu in devices}
     job["gpuIndices"] = [mapping[item] for item in job["gpuUuids"]]
     environment = os.environ.copy()
@@ -514,6 +607,9 @@ def tick():
             # new job while another task's reservation cannot be established.
             raise ValueError("；".join(errors))
         pending = [job for job in jobs if job["status"] in ("queued", "stabilizing")]
+        for job in pending:
+            start_datalist(job, timestamp)
+        pending = [job for job in pending if job["status"] in ("queued", "stabilizing")]
         if not pending:
             return
         devices, error = probe_gpus()
@@ -526,14 +622,20 @@ def tick():
             # Earlier tasks retain priority on their entire fixed GPU set;
             # independent GPU sets may stabilize and run concurrently.
             reserved.update(job["gpuUuids"])
+            if job.get("cancelRequestedAt") is not None:
+                job["waitingReason"] = "正在停止 datalist 生成及其子进程"
+                save_job(job)
+                continue
+            preparing = job.get("datalistStatus") in ("pending", "running")
+            preparation_note = "正在生成 datalist；" if preparing else ""
             if reasons:
-                job.update({"status": "queued", "stableSince": None, "waitingReason": "；".join(reasons), "lastProbeAt": timestamp})
+                job.update({"status": "queued", "stableSince": None, "waitingReason": preparation_note + "；".join(reasons), "lastProbeAt": timestamp})
                 save_job(job)
                 continue
             if job.get("stableSince") is None or timestamp - job.get("lastProbeAt", 0) > POLL_SECONDS * 3 or timestamp < job.get("lastProbeAt", 0):
                 job["stableSince"] = timestamp
-            job.update({"lastProbeAt": timestamp, "status": "stabilizing", "waitingReason": "所有 GPU 已满足条件，确认稳定 %s / 30 秒" % min(30, int(timestamp - job["stableSince"]))})
-            if timestamp - job["stableSince"] >= STABLE_SECONDS:
+            job.update({"lastProbeAt": timestamp, "status": "stabilizing", "waitingReason": preparation_note + "所有 GPU 已满足条件，确认稳定 %s / 30 秒" % min(30, int(timestamp - job["stableSince"]))})
+            if timestamp - job["stableSince"] >= STABLE_SECONDS and not preparing:
                 try:
                     # Fresh GPU checks and process creation happen under the same
                     # queue lock; no other ModelGym submit/cancel can race them.
@@ -548,31 +650,45 @@ def tick():
             save_job(job)
 
 
-def run_job(job_id):
+def run_job(job_id, datalist=False):
     cancelled = [False]
     def on_terminate(_signum, _frame):
         cancelled[0] = True
     signal.signal(signal.SIGTERM, on_terminate)
     signal.signal(signal.SIGINT, on_terminate)
+    pid_field = "datalistPid" if datalist else "pid"
+    identity_field = "datalistProcessIdentity" if datalist else "processIdentity"
+    stage_name = "datalist 生成" if datalist else "训练"
     with lock():
         job = load_job(job_id)
-        if not job or job["status"] != "running" or job.get("pid") != os.getpid() or not identity_alive(job.get("processIdentity")):
+        active = job and ((job["status"] in ("queued", "stabilizing") and job.get("datalistStatus") == "running") if datalist else job["status"] == "running")
+        if not active or job.get(pid_field) != os.getpid() or not identity_alive(job.get(identity_field)):
             return
         if job.get("cancelRequestedAt") is not None:
             job.update({"status": "cancelled", "endedAt": int(now()), "waitingReason": "启动前已取消"})
+            if datalist:
+                job.update({"datalistStatus": "failed", "datalistEndedAt": int(now())})
             save_job(job)
             return
         working_directory, script, config = resolved_paths(job["profile"])
-        if not os.path.isdir(working_directory) or not os.path.isfile(script) or not os.path.isfile(config):
-            job.update({"status": "failed", "endedAt": int(now()), "waitingReason": "发车前检查失败：工作目录、脚本或配置已不存在"})
+        if not datalist and job["profile"].get("datalistScriptPath") and job.get("datalistStatus") != "completed":
+            job.update({"status": "failed", "endedAt": int(now()), "waitingReason": "datalist 尚未生成成功，未启动训练"})
+            save_job(job)
+            return
+        arguments = datalist_argv(job["profile"]) if datalist else command_argv(job["profile"])
+        required_files = [arguments[len(command_prefix(job["profile"]))]] if datalist else [script, config]
+        if not os.path.isdir(working_directory) or any(not os.path.isfile(path) for path in required_files):
+            job.update({"status": "failed", "endedAt": int(now()), "waitingReason": stage_name + "启动前检查失败：工作目录、脚本或配置已不存在"})
+            if datalist:
+                job.update({"datalistStatus": "failed", "datalistEndedAt": int(now())})
             save_job(job)
             return
         environment = os.environ.copy()
         # NVML/nvidia-smi indices can differ from CUDA's enumeration order.
         # Complete UUIDs bind training to the exact devices whose state we checked.
-        environment["CUDA_VISIBLE_DEVICES"] = ",".join(job["gpuUuids"])
+        environment["CUDA_VISIBLE_DEVICES"] = "" if datalist else ",".join(job["gpuUuids"])
         environment["PYTHONUNBUFFERED"] = "1"
-        arguments = command_argv(job["profile"])
+        print("[ModelGym] " + stage_name + "开始", flush=True)
         # Record the actual launch context before project imports can fail.
         # Absolute script paths do not change the configured working directory.
         print("[ModelGym] 工作目录：" + working_directory, flush=True)
@@ -582,20 +698,29 @@ def run_job(job_id):
         try:
             process = subprocess.Popen(arguments, cwd=working_directory, env=environment, stdin=subprocess.DEVNULL, close_fds=True)
         except OSError as error:
-            job.update({"status": "failed", "endedAt": int(now()), "waitingReason": "无法启动训练程序：" + str(error)[:500]})
+            job.update({"status": "failed", "endedAt": int(now()), "waitingReason": "无法启动" + stage_name + "程序：" + str(error)[:500]})
+            if datalist:
+                job.update({"datalistStatus": "failed", "datalistEndedAt": int(now())})
             save_job(job)
             return
     code = process.wait()
     # A foreground launcher may finish before its children; keep GPU reservations
     # until the remaining, job-tagged process group members actually exit.
-    while owned_group_members(job, exclude=os.getpid()):
+    while owned_group_members(datalist_process(job) if datalist else job, exclude=os.getpid()):
         time.sleep(0.25)
     with lock():
         current = load_job(job_id)
-        if current and current["status"] == "running" and current.get("pid") == os.getpid():
+        active = current and ((current["status"] in ("queued", "stabilizing") and current.get("datalistStatus") == "running") if datalist else current["status"] == "running")
+        if active and current.get(pid_field) == os.getpid():
             was_cancelled = cancelled[0] or current.get("cancelRequestedAt") is not None
-            current.update({"status": "cancelled" if was_cancelled else "completed" if code == 0 else "failed", "exitCode": code, "endedAt": int(now()), "waitingReason": "训练已取消" if was_cancelled else "" if code == 0 else "训练程序退出，代码 %s；未自动重跑" % code})
+            if datalist:
+                current.update({"datalistStatus": "completed" if code == 0 and not was_cancelled else "failed", "datalistExitCode": code, "datalistEndedAt": int(now()), "waitingReason": "datalist 生成已取消" if was_cancelled else "datalist 生成完成，继续等待 GPU 空闲" if code == 0 else "datalist 生成失败，退出代码 %s；未启动训练，未自动重跑" % code})
+                if code != 0 or was_cancelled:
+                    current.update({"status": "cancelled" if was_cancelled else "failed", "exitCode": code, "endedAt": int(now())})
+            else:
+                current.update({"status": "cancelled" if was_cancelled else "completed" if code == 0 else "failed", "exitCode": code, "endedAt": int(now()), "waitingReason": "训练已取消" if was_cancelled else "" if code == 0 else "训练程序退出，代码 %s；未自动重跑" % code})
             save_job(current)
+            print("[ModelGym] %s结束，退出代码 %s" % (stage_name, code), flush=True)
 
 
 def cancel(job_id):
@@ -604,8 +729,17 @@ def cancel(job_id):
         if job is None:
             raise ValueError("训练任务不存在")
         if job["status"] in ("queued", "stabilizing"):
-            job.update({"status": "cancelled", "endedAt": int(now()), "waitingReason": "排队任务已取消"})
-            save_job(job)
+            reconcile(job, now())
+            if job["status"] not in ("queued", "stabilizing"):
+                return public_job(job)
+            if job.get("datalistStatus") == "running":
+                job.setdefault("cancelRequestedAt", now())
+                job["waitingReason"] = "正在停止 datalist 生成及其子进程"
+                save_job(job)
+                signal_job(datalist_process(job), signal.SIGTERM)
+            else:
+                job.update({"status": "cancelled", "endedAt": int(now()), "waitingReason": "排队任务已取消"})
+                save_job(job)
         elif job["status"] == "running":
             reconcile(job, now())
             if job["status"] == "running":
@@ -652,6 +786,7 @@ def daemon():
         with lock("daemon.lock", blocking=False):
             with lock():
                 atomic_json(STATE_DIR / "daemon.json", identity(os.getpid()))
+                atomic_json(STATE_DIR / "daemon-version.json", {"workerSha256": WORKER_VERSION})
             while True:
                 try:
                     tick()
@@ -668,10 +803,10 @@ def main():
         if sys.argv[2] != HOST_NAMESPACE:
             raise ValueError("训练守护进程机器身份不匹配")
         daemon()
-    elif len(sys.argv) == 4 and sys.argv[1] == "run":
+    elif len(sys.argv) == 4 and sys.argv[1] in ("run", "datalist"):
         if sys.argv[3] != HOST_NAMESPACE:
             raise ValueError("训练运行器机器身份不匹配，操作已阻止")
-        run_job(validate_id(sys.argv[2]))
+        run_job(validate_id(sys.argv[2]), datalist=sys.argv[1] == "datalist")
     elif len(sys.argv) == 3 and sys.argv[1] == "rpc":
         try:
             request = json.loads(base64.b64decode(sys.argv[2], validate=True))

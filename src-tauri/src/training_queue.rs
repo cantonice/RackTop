@@ -27,6 +27,9 @@ fn default_config_mode() -> String {
 fn default_config_flag() -> String {
     "--config".into()
 }
+fn default_minimum_free_memory_gb() -> f64 {
+    10.0
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +40,10 @@ pub struct TrainingProfile {
     pub working_directory: String,
     #[serde(default = "default_interpreter")]
     pub interpreter: String,
+    #[serde(default)]
+    pub datalist_script_path: String,
+    #[serde(default)]
+    pub datalist_arguments: String,
     pub script_path: String,
     pub config_path: String,
     #[serde(default = "default_config_mode")]
@@ -46,7 +53,7 @@ pub struct TrainingProfile {
     #[serde(default)]
     pub extra_arguments: String,
     pub gpu_uuids: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_minimum_free_memory_gb")]
     pub minimum_free_memory_gb: f64,
     #[serde(default)]
     pub created_at: Option<f64>,
@@ -75,6 +82,8 @@ pub struct TrainingPathCheck {
     pub working_directory_exists: bool,
     pub script_exists: bool,
     pub config_exists: bool,
+    #[serde(default)]
+    pub datalist_script_exists: Option<bool>,
     pub python_available: bool,
     pub nvidia_smi_available: bool,
     pub interpreter_available: bool,
@@ -95,6 +104,8 @@ pub struct TrainingJob {
     pub gpu_indices: Vec<u32>,
     pub command: String,
     pub status: String,
+    #[serde(default)]
+    pub datalist_status: Option<String>,
     pub waiting_reason: String,
     pub created_at: f64,
     pub started_at: Option<f64>,
@@ -272,8 +283,13 @@ fn validate_profile(profile: &TrainingProfile, require_gpus: bool) -> Result<(),
         (&profile.config_path, "配置文件路径", 4096, false),
         (&profile.config_flag, "配置参数名", 100, true),
         (&profile.extra_arguments, "附加参数", 16384, true),
+        (&profile.datalist_script_path, "datalist 生成脚本路径", 4096, true),
+        (&profile.datalist_arguments, "datalist 生成脚本参数", 16384, true),
     ] {
         validate_text(value, label, maximum, allow_empty)?;
+    }
+    if profile.datalist_script_path.trim().is_empty() && !profile.datalist_arguments.trim().is_empty() {
+        return Err("请填写 datalist 生成脚本，或清空生成脚本参数".into());
     }
     if !matches!(profile.config_mode.as_str(), "flag" | "positional") {
         return Err("配置文件传参方式无效".into());
@@ -623,6 +639,39 @@ mod tests {
         let defaulted: TrainingProfile = serde_json::from_value(value).unwrap();
         assert_eq!(defaulted.config_mode, "positional");
         assert_eq!(profile().config_mode, "flag");
+    }
+    #[test]
+    fn datalist_profile_defaults_and_fields_survive_storage() {
+        let mut configured = profile();
+        assert!(configured.datalist_script_path.is_empty());
+        assert!(configured.datalist_arguments.is_empty());
+        configured.datalist_script_path = "tools/create list.py".into();
+        configured.datalist_arguments = "--output 'data/train list.json'".into();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("modelgym-training.sqlite");
+        TrainingStore::open(&path).unwrap().save_profile(configured.clone()).unwrap();
+        let restored = TrainingStore::open(&path).unwrap().list_profiles().unwrap().remove(0);
+        assert_eq!(restored.datalist_script_path, configured.datalist_script_path);
+        assert_eq!(restored.datalist_arguments, configured.datalist_arguments);
+    }
+    #[test]
+    fn datalist_paths_and_arguments_are_validated() {
+        let mut configured = profile();
+        configured.datalist_arguments = "--output list.json".into();
+        assert!(validate_profile(&configured, true).unwrap_err().contains("生成脚本"));
+        configured.datalist_script_path = "tools/list.py".into();
+        assert!(validate_profile(&configured, true).is_ok());
+        for mutate in [
+            |profile: &mut TrainingProfile| profile.datalist_script_path.push('\0'),
+            |profile: &mut TrainingProfile| profile.datalist_script_path.push('\n'),
+            |profile: &mut TrainingProfile| profile.datalist_arguments.push('\r'),
+            |profile: &mut TrainingProfile| profile.datalist_script_path = "x".repeat(4097),
+            |profile: &mut TrainingProfile| profile.datalist_arguments = "x".repeat(16385),
+        ] {
+            let mut invalid = configured.clone();
+            mutate(&mut invalid);
+            assert!(validate_profile(&invalid, true).is_err());
+        }
     }
     #[test]
     fn local_profiles_and_remote_cache_survive_reopen_without_touching_main_database() {

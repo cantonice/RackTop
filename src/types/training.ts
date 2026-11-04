@@ -4,6 +4,8 @@ export interface TrainingProfile {
   serverId: string
   workingDirectory: string
   interpreter: string
+  datalistScriptPath?: string
+  datalistArguments?: string
   scriptPath: string
   configPath: string
   configMode: 'flag' | 'positional'
@@ -32,6 +34,7 @@ export interface TrainingPathCheck {
   workingDirectoryExists: boolean
   scriptExists: boolean
   configExists: boolean
+  datalistScriptExists?: boolean | null
   pythonAvailable: boolean
   nvidiaSmiAvailable: boolean
   interpreterAvailable?: boolean
@@ -52,6 +55,7 @@ export interface TrainingJob {
   gpuIndices: number[]
   command: string
   status: TrainingJobStatus
+  datalistStatus?: 'pending' | 'running' | 'completed' | 'failed' | null
   waitingReason: string
   createdAt: number
   startedAt?: number | null

@@ -25,6 +25,8 @@ SPEC = importlib.util.spec_from_file_location("modelgym_training", WORKER_PATH)
 queue = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(queue)
 REAL_RUN = subprocess.run
+REAL_START_DATALIST = queue.start_datalist
+REAL_ENSURE_DAEMON = queue.ensure_daemon
 
 
 class TrainingQueueTests(unittest.TestCase):
@@ -33,6 +35,7 @@ class TrainingQueueTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.clock = 1000.0
         self.launches = []
+        self.datalist_launches = []
         self.patches = []
         self.previous_signals = {value: signal.getsignal(value) for value in (signal.SIGTERM, signal.SIGINT)}
         self.patch("STATE_DIR", self.root / "state")
@@ -41,6 +44,7 @@ class TrainingQueueTests(unittest.TestCase):
         self.patch("owned_group_members", lambda _job, exclude=None: [])
         self.patch("identity_alive", lambda record: bool(record and record.get("bootId") == "test-boot"))
         self.patch("launch", self.fake_launch)
+        self.patch("start_datalist", self.fake_start_datalist)
         self.workdir = self.root / "project with spaces"
         self.workdir.mkdir()
         self.script = self.workdir / "train.py"
@@ -93,6 +97,8 @@ else:
         defaulted = queue.normalize_profile(profile)
         self.assertEqual(defaulted["configMode"], "positional")
         self.assertNotIn("--config", queue.command_argv(defaulted))
+        del profile["minimumFreeMemoryGb"]
+        self.assertEqual(queue.normalize_profile(profile)["minimumFreeMemoryGb"], 10)
 
     def state(self, **updates):
         value = json.loads(self.gpu_state.read_text(encoding="utf-8"))
@@ -104,6 +110,197 @@ else:
         mapping = {gpu["uuid"]: gpu["index"] for gpu in devices}
         job.update({"status": "running", "gpuIndices": [mapping[item] for item in job["gpuUuids"]], "pid": 9000 + len(self.launches), "startedAt": timestamp, "processIdentity": {"pid": 9000 + len(self.launches), "startTicks": "10", "bootId": "test-boot"}, "waitingReason": ""})
         queue.save_job(job)
+
+    def fake_start_datalist(self, job, timestamp):
+        if job.get("datalistStatus") != "pending" or job["status"] not in ("queued", "stabilizing"):
+            return
+        self.datalist_launches.append(job["id"])
+        pid = 12000 + len(self.datalist_launches)
+        job.update({"datalistStatus": "running", "datalistPid": pid, "datalistProcessIdentity": {"pid": pid, "startTicks": "10", "bootId": "test-boot"}, "datalistStartedAt": timestamp})
+        queue.save_job(job)
+
+    def datalist_profile(self, body=None):
+        script = self.workdir / "generate datalist.py"
+        script.write_text(body or "import json, os, sys\nfrom pathlib import Path\nPath('prepared.json').write_text(json.dumps({'cuda':os.environ['CUDA_VISIBLE_DEVICES'],'args':sys.argv[1:],'cwd':os.getcwd()}))\n", encoding="utf-8")
+        return dict(self.profile(), datalistScriptPath=script.name, datalistArguments="--label 'a b $(literal)'")
+
+    def finish_datalist(self, job_id):
+        job = queue.load_job(job_id)
+        job.update({"datalistPid": os.getpid(), "datalistProcessIdentity": {"pid": os.getpid(), "startTicks": "10", "bootId": "test-boot"}})
+        queue.save_job(job)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            queue.run_job(job_id, datalist=True)
+        return output.getvalue()
+
+    def test_datalist_runs_once_immediately_while_gpus_are_busy_then_training_waits(self):
+        self.state(busy=["GPU-a"])
+        profile, job_id = self.datalist_profile(), str(uuid.uuid4())
+        rejected = queue.submit(job_id, profile, False)
+        self.assertTrue(rejected["requiresQueueConfirmation"])
+        self.assertFalse(self.datalist_launches)
+        accepted = queue.submit(job_id, profile, True)["job"]
+        self.assertEqual(self.datalist_launches, [job_id])
+        self.assertEqual(accepted["datalistStatus"], "running")
+        self.assertIsNone(accepted["startedAt"])
+        output = self.finish_datalist(job_id)
+        received = json.loads((self.workdir / "prepared.json").read_text())
+        self.assertEqual(received["cuda"], "")
+        self.assertEqual(received["args"], ["--label", "a b $(literal)"])
+        self.assertEqual(Path(received["cwd"]).resolve(), self.workdir.resolve())
+        self.assertIn("datalist 生成开始", output)
+        self.assertIn("datalist 生成结束，退出代码 0", output)
+        self.tick_for(32)
+        self.assertFalse(self.launches)
+        queue.submit(job_id, profile, True)
+        self.assertEqual(self.datalist_launches, [job_id])
+        self.state(busy=[])
+        self.tick_for(32)
+        self.assertEqual(self.launches, [job_id])
+
+    def test_gpu_stability_is_measured_during_datalist_but_training_cannot_start_early(self):
+        profile, job_id = self.datalist_profile(), str(uuid.uuid4())
+        queue.submit(job_id, profile, True)
+        self.tick_for(40)
+        self.assertFalse(self.launches)
+        self.assertEqual(queue.load_job(job_id)["stableSince"], 1000)
+        self.assertIn("生成 datalist", queue.load_job(job_id)["waitingReason"])
+        self.finish_datalist(job_id)
+        self.state(busy=["GPU-a"])
+        self.tick_for(2)
+        self.assertFalse(self.launches)
+        self.state(busy=[])
+        self.tick_for(32)
+        self.assertEqual(self.launches, [job_id])
+
+    def test_datalist_failure_stops_the_job_and_never_retries_or_trains(self):
+        profile, job_id = self.datalist_profile("raise SystemExit(7)\n"), str(uuid.uuid4())
+        queue.submit(job_id, profile, True)
+        self.finish_datalist(job_id)
+        failed = queue.load_job(job_id)
+        self.assertEqual((failed["status"], failed["datalistStatus"], failed["datalistExitCode"]), ("failed", "failed", 7))
+        self.assertIn("未启动训练", failed["waitingReason"])
+        self.tick_for(40)
+        queue.submit(job_id, profile, True)
+        self.assertFalse(self.launches)
+        self.assertEqual(self.datalist_launches, [job_id])
+
+    def test_datalist_submit_retries_and_pending_recovery_do_not_duplicate_preparation(self):
+        profile, job_id = self.datalist_profile(), str(uuid.uuid4())
+        with mock.patch.object(queue, "start_datalist"):
+            queue.submit(job_id, profile, True)  # A crash before process creation.
+        self.assertEqual(queue.load_job(job_id)["datalistStatus"], "pending")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(lambda _: queue.submit(job_id, profile, True), range(2)))
+        self.tick_for(8)
+        self.assertEqual(self.datalist_launches, [job_id])
+        self.assertFalse(self.launches)
+
+    def test_cancelling_datalist_waits_for_runner_and_descendants_before_finishing(self):
+        job_id = str(uuid.uuid4())
+        queue.submit(job_id, self.datalist_profile(), True)
+        with mock.patch.object(queue, "signal_job") as signal_job:
+            result = queue.cancel(job_id)
+            self.assertIn(result["status"], ("queued", "stabilizing"))
+            self.assertIn("正在停止 datalist", result["waitingReason"])
+            self.assertEqual(signal_job.call_args.args[0]["pid"], 12001)
+            self.assertEqual(signal_job.call_args.args[1], signal.SIGTERM)
+            self.clock += 8
+            queue.tick()
+            self.assertEqual(signal_job.call_args.args[1], queue.KILL_SIGNAL)
+            with mock.patch.object(queue, "identity_alive", return_value=False), mock.patch.object(queue, "owned_group_members", return_value=[{"pid": 12002}]):
+                queue.tick()
+                self.assertIn(queue.load_job(job_id)["status"], ("queued", "stabilizing"))
+            with mock.patch.object(queue, "identity_alive", return_value=False):
+                queue.tick()
+        self.assertEqual(queue.load_job(job_id)["status"], "cancelled")
+        self.assertFalse(self.launches)
+
+    def test_interrupted_datalist_fails_closed_instead_of_running_it_again(self):
+        profile, job_id = self.datalist_profile(), str(uuid.uuid4())
+        queue.submit(job_id, profile, True)
+        with mock.patch.object(queue, "identity_alive", return_value=False):
+            queue.tick()
+        self.assertEqual(queue.load_job(job_id)["status"], "failed")
+        queue.submit(job_id, profile, True)
+        self.assertEqual(self.datalist_launches, [job_id])
+        self.assertFalse(self.launches)
+
+    def test_cancel_preserves_an_already_interrupted_datalist_failure(self):
+        job_id = str(uuid.uuid4())
+        queue.submit(job_id, self.datalist_profile(), True)
+        with mock.patch.object(queue, "identity_alive", return_value=False):
+            result = queue.cancel(job_id)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("进程中断", result["waitingReason"])
+
+    def test_datalist_launcher_has_an_independent_session_and_hides_gpus(self):
+        profile, job_id = self.datalist_profile(), str(uuid.uuid4())
+        with mock.patch.object(queue, "start_datalist"):
+            queue.submit(job_id, profile, True)
+        job = queue.load_job(job_id)
+        record = {"pid": 12099, "startTicks": "10", "bootId": "test-boot"}
+        with mock.patch.object(queue.subprocess, "Popen", return_value=mock.Mock(pid=12099)) as popen, mock.patch.object(queue, "identity", return_value=record):
+            with queue.lock():
+                REAL_START_DATALIST(job, self.clock)
+                REAL_START_DATALIST(job, self.clock)
+        popen.assert_called_once()
+        self.assertEqual(popen.call_args.args[0][2], "datalist")
+        self.assertEqual(popen.call_args.kwargs["env"]["CUDA_VISIBLE_DEVICES"], "")
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        self.assertEqual(queue.load_job(job_id)["datalistPid"], 12099)
+
+    def test_old_job_without_optional_fields_keeps_its_original_spec_hash(self):
+        profile, job_id = self.profile(), str(uuid.uuid4())
+        queue.submit(job_id, profile, True)
+        job = queue.load_job(job_id)
+        job["profile"].pop("datalistScriptPath")
+        job["profile"].pop("datalistArguments")
+        job.pop("datalistStatus")
+        queue.save_job(job)
+        self.assertEqual(queue.load_job(job_id)["specHash"], queue.spec_hash(profile))
+        self.assertEqual(queue.submit(job_id, profile, True)["job"]["id"], job_id)
+
+    def test_datalist_path_check_and_arguments_validation(self):
+        profile = self.datalist_profile()
+        report, issues, _ = queue.check_paths(profile)
+        self.assertTrue(report["datalistScriptExists"])
+        self.assertFalse(issues)
+        profile["datalistScriptPath"] = "missing.py"
+        report, issues, _ = queue.check_paths(profile)
+        self.assertFalse(report["datalistScriptExists"])
+        self.assertTrue(any("datalist" in issue for issue in issues))
+        profile["datalistScriptPath"] = ""
+        with self.assertRaisesRegex(ValueError, "同时填写"):
+            queue.normalize_profile(profile)
+        profile["datalistScriptPath"] = "prepare.py"
+        profile["datalistArguments"] = "--out list.txt && touch bad"
+        with self.assertRaisesRegex(ValueError, "shell"):
+            queue.normalize_profile(profile)
+
+    def test_daemon_upgrade_replaces_only_the_verified_daemon_pid(self):
+        previous = {"pid": 14001, "startTicks": "10", "bootId": "test-boot"}
+        replacement = {"pid": 14002, "startTicks": "11", "bootId": "test-boot"}
+        queue.atomic_json(queue.STATE_DIR / "daemon.json", previous)
+        alive = {14001: True, 14002: True}
+        with mock.patch.object(queue, "identity_alive", side_effect=lambda record: bool(record and alive.get(record["pid"]))), mock.patch.object(queue.os, "kill", side_effect=lambda pid, _signal: alive.update({pid: False})) as kill, mock.patch.object(queue.os, "killpg", create=True) as killpg, mock.patch.object(queue.subprocess, "Popen", return_value=mock.Mock(pid=14002)) as popen, mock.patch.object(queue, "identity", return_value=replacement):
+            with queue.lock():
+                REAL_ENSURE_DAEMON()
+                REAL_ENSURE_DAEMON()
+        kill.assert_called_once_with(14001, signal.SIGTERM)
+        killpg.assert_not_called()
+        popen.assert_called_once()
+        self.assertEqual(json.loads((queue.STATE_DIR / "daemon.json").read_text()), replacement)
+        self.assertEqual(json.loads((queue.STATE_DIR / "daemon-version.json").read_text())["workerSha256"], queue.WORKER_VERSION)
+
+    def test_daemon_upgrade_does_not_start_a_second_daemon_when_the_old_one_cannot_exit(self):
+        previous = {"pid": 14001, "startTicks": "10", "bootId": "test-boot"}
+        queue.atomic_json(queue.STATE_DIR / "daemon.json", previous)
+        with mock.patch.object(queue, "identity_alive", return_value=True), mock.patch.object(queue.os, "kill") as kill, mock.patch.object(queue.time, "monotonic", side_effect=[0, 3]), mock.patch.object(queue.subprocess, "Popen") as popen:
+            with queue.lock(), self.assertRaisesRegex(RuntimeError, "尚未退出"):
+                REAL_ENSURE_DAEMON()
+        kill.assert_called_once_with(14001, signal.SIGTERM)
+        popen.assert_not_called()
 
     def tick_for(self, seconds):
         for _ in range(seconds // 2):
