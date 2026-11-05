@@ -1,13 +1,88 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Server, Snapshot } from '../types/models'
 import type { TrainingProfile } from '../types/training'
-import { datalistCommandPreview, defaultTrainingInterpreter, trainingApi, trainingCommandPreview, trainingGpuFromSnapshot, trainingServerChange, validateTrainingProfile } from './training'
+import { DEFAULT_TRAINING_PROJECT_COLOR, datalistCommandPreview, defaultTrainingInterpreter, trainingApi, trainingCommandPreview, trainingGpuFromSnapshot, trainingProjectColor, trainingProjectIndex, trainingServerChange, validateTrainingProfile } from './training'
 
 const profile: TrainingProfile = { id: 'profile', name: 'Model training', serverId: 'server', workingDirectory: '/work/my model', interpreter: 'conda run -n train python -u', scriptPath: "scripts/train's model.py", configPath: 'configs/base config.yaml', configMode: 'flag', configFlag: '--config', extraArguments: '--epochs 20 --label "baseline run"', gpuUuids: ['GPU-0'], minimumFreeMemoryGb: 8 }
 
 function server(number: number, username = 'zhouzhen'): Server {
   return { id: `server-${number}`, name: String(number), host: `192.168.0.${number}`, port: 22, username, tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, authMethod: 'sshAgent', status: 'online' }
 }
+
+describe('independent training project classifications', () => {
+  it('indexes trimmed project names and legacy unclassified profiles and assigns distinct available colors', () => {
+    const profiles = [profile, { ...profile, id: 'a', projectName: ' Detection ', projectColor: '#8B5CF6' }, { ...profile, id: 'b', projectName: 'Detection', projectColor: '#8b5cf6' }]
+    expect(trainingProjectIndex(profiles)).toEqual([{ name: 'Detection', color: '#8b5cf6', count: 2 }, { name: '', color: DEFAULT_TRAINING_PROJECT_COLOR, count: 1 }])
+    expect(trainingProjectColor(' Detection ', profiles)).toBe('#8b5cf6')
+    expect(trainingProjectColor('', profiles)).toBe(DEFAULT_TRAINING_PROJECT_COLOR)
+    expect(trainingProjectColor('Segmentation', profiles)).not.toBe('#8b5cf6')
+    const many: TrainingProfile[] = []
+    for (let index = 0; index < 16; index++) {
+      const name = `Project ${index}`
+      many.push({ ...profile, id: name, projectName: name, projectColor: trainingProjectColor(name, many) })
+    }
+    expect(new Set(many.map((item) => item.projectColor)).size).toBe(16)
+    expect(trainingCommandPreview(profiles[1])).toBe(trainingCommandPreview(profile))
+  })
+
+  it('validates project names by trimmed UTF-8 byte length and accepts only hex colors', () => {
+    expect(validateTrainingProfile({ ...profile, projectName: ` ${'数'.repeat(40)} `, projectColor: '#ABC123' })).toBeNull()
+    expect(validateTrainingProfile({ ...profile, projectName: '数'.repeat(41) })).toContain('120 字节')
+    for (const name of ['project\n', 'project\r', 'project\0']) expect(validateTrainingProfile({ ...profile, projectName: name })).toContain('项目名称')
+    for (const color of ['red', '#abc', '#12345g', '#12345678', '']) expect(validateTrainingProfile({ ...profile, projectColor: color })).toContain('#RRGGBB')
+  })
+
+  it('persists shared colors across a project and leaves other projects and job snapshots intact', async () => {
+    const items = new Map<string, string>()
+    vi.stubGlobal('localStorage', { getItem: (key: string) => items.get(key) ?? null, setItem: (key: string, value: string) => items.set(key, value) })
+    try {
+      await trainingApi.saveProfile({ ...profile, id: 'one', projectName: ' Detection ', projectColor: '#ABC123' })
+      await trainingApi.saveProfile({ ...profile, id: 'other', projectName: 'Segmentation', projectColor: '#10b981' })
+      await trainingApi.saveProfile({ ...profile, id: 'two', projectName: 'Detection', projectColor: '#8b5cf6' })
+      const restored = await trainingApi.listProfiles()
+      expect(restored.filter((item) => item.projectName === 'Detection').map((item) => item.projectColor)).toEqual(['#8b5cf6', '#8b5cf6'])
+      expect(restored.find((item) => item.id === 'other')?.projectColor).toBe('#10b981')
+      await trainingApi.saveProfile({ ...restored.find((item) => item.id === 'one')!, projectName: 'New project', projectColor: '#ec4899' })
+      expect((await trainingApi.listProfiles()).find((item) => item.id === 'two')?.projectColor).toBe('#8b5cf6')
+      expect((await trainingApi.saveProfile({ ...profile, projectName: '  ' })).projectColor).toBe(DEFAULT_TRAINING_PROJECT_COLOR)
+    } finally { vi.unstubAllGlobals() }
+  })
+})
+
+describe('training history deletion preview', () => {
+  it('rejects a delayed submit after cleanup has already marked that task deleted', async () => {
+    const items = new Map<string, string>()
+    vi.stubGlobal('localStorage', { getItem: (key: string) => items.get(key) ?? null, setItem: (key: string, value: string) => items.set(key, value) })
+    let resolve!: (value: Awaited<ReturnType<typeof trainingApi.checkPaths>>) => void
+    const check = vi.spyOn(trainingApi, 'checkPaths').mockImplementationOnce(() => new Promise((done) => { resolve = done }))
+    try {
+      const pending = expect(trainingApi.submit('late', profile, true)).rejects.toThrow('已删除')
+      await trainingApi.deleteJobs(profile.serverId, ['late'])
+      resolve({ ok: true, workingDirectoryExists: true, scriptExists: true, configExists: true, pythonAvailable: true, nvidiaSmiAvailable: true, gpus: [], commandPreview: '', message: 'demo' })
+      await pending
+      expect(await trainingApi.listJobs()).toEqual([])
+    } finally { check.mockRestore(); vi.unstubAllGlobals() }
+  })
+
+  it('deletes only selected ended records on the chosen server, reports active failures and prevents old submit retries', async () => {
+    const items = new Map<string, string>()
+    vi.stubGlobal('localStorage', { getItem: (key: string) => items.get(key) ?? null, setItem: (key: string, value: string) => items.set(key, value) })
+    const check = vi.spyOn(trainingApi, 'checkPaths').mockResolvedValue({ ok: true, workingDirectoryExists: true, scriptExists: true, configExists: true, pythonAvailable: true, nvidiaSmiAvailable: true, gpus: [{ uuid: 'GPU-0', index: 0, name: 'GPU', utilization: 0, memoryUsedMb: 0, memoryTotalMb: 24 * 1024, computeProcessCount: 0, eligible: true, reasons: [] }], commandPreview: '', message: 'demo' })
+    try {
+      await trainingApi.submit('ended', profile, false)
+      await trainingApi.cancelJob(profile.serverId, 'ended')
+      await trainingApi.submit('active', profile, false)
+      await trainingApi.submit('ended', { ...profile, serverId: 'other' }, false)
+      const result = await trainingApi.deleteJobs(profile.serverId, ['ended', 'active', 'ended'])
+      expect(result.deletedJobIds).toEqual(['ended'])
+      expect(result.failures).toEqual([{ jobId: 'active', message: '仅可删除已结束的任务记录。' }])
+      expect((await trainingApi.listJobs()).map((job) => `${job.serverId}:${job.id}`)).toEqual(['other:ended', 'server:active'])
+      expect(await trainingApi.deleteJobs(profile.serverId, ['ended'])).toEqual({ deletedJobIds: ['ended'], failures: [] })
+      await expect(trainingApi.submit('ended', profile, false)).rejects.toThrow('已删除')
+      await expect(trainingApi.deleteJobs(profile.serverId, Array.from({ length: 201 }, (_, index) => String(index)))).rejects.toThrow('200')
+    } finally { check.mockRestore(); vi.unstubAllGlobals() }
+  })
+})
 
 describe('training server defaults', () => {
   it.each([20, 21, 23])('uses the CUDA 13 training environment on server %s', (number) => {

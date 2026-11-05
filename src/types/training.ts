@@ -1,6 +1,8 @@
 export interface TrainingProfile {
   id: string
   name: string
+  projectName?: string
+  projectColor?: string
   serverId: string
   workingDirectory: string
   interpreter: string
@@ -70,6 +72,11 @@ export interface TrainingSubmitResult {
   job: TrainingJob | null
   requiresQueueConfirmation: boolean
   reasons: string[]
+}
+
+export interface TrainingDeleteJobsResult {
+  deletedJobIds: string[]
+  failures: { jobId: string; message: string }[]
 }
 
 export const TRAINING_STATUS_LABELS: Record<TrainingJobStatus, string> = {

@@ -1807,7 +1807,7 @@ function App() {
 
         <div className={`workspace__scroll ${showTerminal ? 'workspace__scroll--terminal' : ''}`}>
           {mainView === 'training' ? (
-            <TrainingView servers={servers} snapshots={snapshots} onNotice={setToast} onRefreshServer={(serverId) => refreshServer(serverId)} onJobAccepted={trainingCompletions.observeJob} completionJobId={trainingCompletionJobId} />
+            <TrainingView servers={servers} snapshots={snapshots} onNotice={setToast} onRefreshServer={(serverId) => refreshServer(serverId)} onJobAccepted={trainingCompletions.observeJob} completionJobId={trainingCompletionJobId} onJobsDeleted={(jobs) => { for (const job of jobs) trainingCompletions.dismiss(JSON.stringify([job.serverId, job.jobId])) }} />
           ) : shouldShowGuidedEmptyState(mainView, servers.length) ? (
             <EmptyState onboarding={<OnboardingChecklist steps={onboardingSteps} previewStep={onboardingPreviewStep} collapsed={onboardingCollapsed} dismissed={onboardingDismissed} useActualState={onboardingUseActualState} showPreviewControls={!api.isDesktop} onPreviewStepChange={setOnboardingPreviewStep} onCollapsedChange={setOnboardingCollapsed} onDismiss={() => { localStorage.setItem(ONBOARDING_DISMISSED_KEY, 'true'); setOnboardingDismissed(true); setToast('已隐藏新手引导，可在“设置 → 通用”中重新显示') }} onUseActualStateChange={setOnboardingUseActualState} />} onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
           ) : servers.length === 0 ? (

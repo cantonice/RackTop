@@ -64,6 +64,30 @@
 .training-profile dt { color: var(--text-tertiary); }
 .training-profile dd { overflow: hidden; margin: 0; color: var(--text-secondary); text-overflow: ellipsis; white-space: nowrap; }
 .training-profile footer { margin-top: 17px; padding-top: 12px; border-top: 1px solid var(--border); }
+.training-project-index { display: flex; flex-wrap: wrap; gap: 7px; margin: 0 0 16px; }
+.training-project-index button { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text-secondary); font-size: calc(11px + var(--font-adjust, 0px)); }
+.training-project-index button.is-active { border-color: var(--project-accent, var(--blue)); color: var(--text); box-shadow: 0 0 0 1px color-mix(in srgb, var(--project-accent, var(--blue)) 12%, transparent); }
+.training-project-index i, .training-project-tag i { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--project-accent, var(--text-tertiary)); }
+.training-project-index span { color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.training-profile { border-inline-start: 3px solid var(--project-accent, var(--border)); }
+.training-profile > .training-project-tag { margin-bottom: -5px; color: var(--text-secondary); font-weight: 600; }
+.training-project-color { display: flex; align-items: center; gap: 9px; }
+.training-project-color input[type="color"] { width: 46px; padding: 3px; flex: none; cursor: pointer; }
+.training-project-color span { color: var(--text-tertiary); font-size: 11px; font-variant-numeric: tabular-nums; }
+.training-history-selection { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font-size: calc(11px + var(--font-adjust, 0px)); }
+.training-history-selection label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+.training-history-selection > span { color: var(--text-tertiary); }
+.training-history-selection > button { margin-left: auto; }
+.training-history-selection input, .training-job__leading > input { accent-color: var(--blue); width: 14px; height: 14px; margin: 0; }
+.training-job__leading { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.training-job.is-selected { border-color: var(--blue); background: color-mix(in srgb, var(--blue) 3%, var(--surface)); }
+.training-deletion-errors { display: block; }
+.training-deletion-errors ul { margin: 8px 0 0; padding-left: 18px; }
+.training-deletion-errors li { overflow-wrap: anywhere; }
+.training-deletion-list { display: grid; gap: 8px; margin: 0 0 14px; padding: 0; max-height: 260px; overflow-y: auto; list-style: none; }
+.training-deletion-list li { padding: 9px 11px; border-radius: 7px; background: var(--surface-subtle); }
+.training-deletion-list strong, .training-deletion-list small { display: block; font-size: calc(11px + var(--font-adjust, 0px)); overflow-wrap: anywhere; }
+.training-deletion-list small { margin-top: 5px; color: var(--text-tertiary); font-weight: 400; }
 .training-scrim { z-index: 120; }
 .sheet.training-sheet { display: flex; width: min(520px, calc(100vw - 40px)); max-height: calc(100vh - 48px); flex-direction: column; overflow: hidden; }
 .sheet.training-sheet--wide { width: min(1120px, calc(100vw - 46px)); }

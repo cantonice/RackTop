@@ -1651,6 +1651,7 @@ pub fn run() {
             training_queue::training_submit,
             training_queue::training_list_jobs,
             training_queue::training_cancel_job,
+            training_queue::training_delete_jobs,
             training_queue::training_read_log,
             update_tray_summary,
             window_minimize,

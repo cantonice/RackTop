@@ -38,6 +38,17 @@ afterEach(() => {
 })
 
 describe('app-level training completion reminders', () => {
+  it('suppresses a late completion poll after its history record has been deleted', async () => {
+    mocks.listJobs.mockResolvedValue([base])
+    await render()
+    let resolve!: (jobs: TrainingJob[]) => void
+    mocks.listJobs.mockReturnValueOnce(new Promise<TrainingJob[]>((done) => { resolve = done }))
+    await tick()
+    act(() => hook.dismiss(JSON.stringify([base.serverId, base.id])))
+    await act(async () => resolve([{ ...base, status: 'completed' }]))
+    expect(hook.alerts).toEqual([])
+    expect(mocks.notify).not.toHaveBeenCalled()
+  })
   it('tracks a just-accepted job even when it finishes before the next poll sees it active', async () => {
     await render()
     act(() => hook.observeJob(base))

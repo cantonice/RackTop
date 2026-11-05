@@ -51,6 +51,84 @@ afterEach(() => {
 })
 
 describe('TrainingView submission and queue confirmation', () => {
+  it('indexes independent projects, filters profiles and synchronizes their accent color after saving', async () => {
+    const profiles = [
+      { ...profile, id: 'a', name: 'A baseline', projectName: 'Project A', projectColor: '#ef4444' },
+      { ...profile, id: 'a2', name: 'A experiment', projectName: 'Project A', projectColor: '#ef4444' },
+      { ...profile, id: 'b', name: 'B baseline', projectName: 'Project B', projectColor: '#10b981' },
+      { ...profile, id: 'legacy', name: 'Legacy profile' },
+    ]
+    vi.mocked(trainingApi.listProfiles).mockResolvedValue(profiles)
+    await render()
+    await act(async () => button('训练配置 4').click())
+    expect(container.querySelectorAll('.training-profile')).toHaveLength(4)
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="筛选项目：Project A"]')!.click())
+    expect(container.querySelectorAll('.training-profile')).toHaveLength(2)
+    expect(container.querySelector<HTMLElement>('.training-profile')!.style.getPropertyValue('--project-accent')).toBe('#ef4444')
+    let resolveProfiles!: (value: TrainingProfile[]) => void
+    vi.mocked(trainingApi.listProfiles).mockImplementationOnce(() => new Promise((done) => { resolveProfiles = done }))
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="刷新训练任务"]')!.click())
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="编辑 A baseline"]')!.click())
+    const color = container.querySelector<HTMLInputElement>('input[aria-label="项目重点色"]')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(color, '#8b5cf6')
+      color.dispatchEvent(new Event('input', { bubbles: true }))
+      color.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await act(async () => button('保存配置').click())
+    await act(async () => resolveProfiles(profiles))
+    await act(async () => button('取消').click())
+    expect([...container.querySelectorAll<HTMLElement>('.training-profile')].map((card) => card.style.getPropertyValue('--project-accent'))).toEqual(['#8b5cf6', '#8b5cf6'])
+    await act(async () => button('新建训练').click())
+    expect(container.querySelector<HTMLInputElement>('input[placeholder="选择或填写项目名（可选）"]')?.value).toBe('Project A')
+    expect(container.querySelector<HTMLInputElement>('input[aria-label="项目重点色"]')?.value).toBe('#8b5cf6')
+  })
+
+  it('only selects ended jobs, confirms cleanup and retains failed deletions for retry', async () => {
+    const done = { ...job, id: 'done', name: 'Done', status: 'completed' as const }
+    const failed = { ...job, id: 'failed', name: 'Failed', status: 'failed' as const }
+    const cancelled = { ...job, id: 'cancelled', name: 'Cancelled', status: 'cancelled' as const }
+    vi.mocked(trainingApi.listJobs).mockResolvedValue([done, failed, cancelled, { ...job, id: 'running', status: 'running' }])
+    const remove = vi.spyOn(trainingApi, 'deleteJobs').mockResolvedValue({ deletedJobIds: [done.id], failures: [{ jobId: failed.id, message: '日志仍被占用' }] })
+    const onDeleted = vi.fn()
+    await act(async () => root.render(<TrainingView servers={[server]} snapshots={{}} onNotice={vi.fn()} onJobsDeleted={onDeleted} />))
+    await act(async () => button('最近结束').click())
+    expect(container.querySelectorAll('input[aria-label^="选择删除"]')).toHaveLength(3)
+    await act(async () => container.querySelector<HTMLInputElement>('[aria-label="全选已结束任务"]')!.click())
+    await act(async () => button('删除所选记录及日志').click())
+    expect(remove).not.toHaveBeenCalled()
+    expect(container.querySelector('[role="alertdialog"]')?.textContent).toContain('3 项已结束任务')
+    await act(async () => button('保留记录').click())
+    expect(remove).not.toHaveBeenCalled()
+    await act(async () => container.querySelector<HTMLInputElement>('[aria-label^="选择删除 Cancelled"]')!.click())
+    await act(async () => button('删除所选记录及日志').click())
+    await act(async () => button('确认删除记录及日志').click())
+    expect(remove).toHaveBeenCalledWith(server.id, [done.id, failed.id])
+    expect(container.querySelector('[aria-label^="选择删除 Done"]')).toBeNull()
+    expect(container.querySelector<HTMLInputElement>('[aria-label^="选择删除 Failed"]')?.checked).toBe(true)
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('日志仍被占用')
+    expect(onDeleted).toHaveBeenCalledWith([{ serverId: server.id, jobId: done.id }])
+  })
+
+  it('keeps same-ID records on other servers and ignores late pre-deletion list responses', async () => {
+    const other = { ...server, id: 'other', name: 'Other server' }
+    const done = { ...job, name: 'Same record', status: 'completed' as const }
+    const sibling = { ...done, serverId: other.id }
+    vi.mocked(trainingApi.listJobs).mockResolvedValue([done, sibling])
+    vi.spyOn(trainingApi, 'deleteJobs').mockResolvedValue({ deletedJobIds: [job.id], failures: [] })
+    await act(async () => root.render(<TrainingView servers={[server, other]} snapshots={{}} onNotice={vi.fn()} />))
+    await act(async () => button('最近结束').click())
+    let resolve!: (jobs: TrainingJob[]) => void
+    vi.mocked(trainingApi.listJobs).mockImplementationOnce(() => new Promise((done) => { resolve = done }))
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="刷新训练任务"]')!.click())
+    await act(async () => container.querySelector<HTMLInputElement>('[aria-label="选择删除 Same record（Training server）"]')!.click())
+    await act(async () => button('删除所选记录及日志').click())
+    await act(async () => button('确认删除记录及日志').click())
+    await act(async () => resolve([done, sibling]))
+    expect(container.querySelector('[aria-label="选择删除 Same record（Training server）"]')).toBeNull()
+    expect(container.querySelector('[aria-label="选择删除 Same record（Other server）"]')).not.toBeNull()
+  })
+
   it('puts optional datalist generation first and saves its script, arguments and CPU command preview', async () => {
     await render(); await openSavedProfile()
     expect(container.querySelector('.training-sheet__body')?.firstElementChild?.getAttribute('aria-label')).toBe('生成 datalist 配置')

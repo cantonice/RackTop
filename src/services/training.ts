@@ -1,10 +1,56 @@
 import { invoke } from '@tauri-apps/api/core'
 import { api } from './api'
 import type { Server, Snapshot } from '../types/models'
-import type { TrainingGpu, TrainingJob, TrainingPathCheck, TrainingProfile, TrainingSubmitResult } from '../types/training'
+import { isActiveTrainingJob } from '../types/training'
+import type { TrainingDeleteJobsResult, TrainingGpu, TrainingJob, TrainingPathCheck, TrainingProfile, TrainingSubmitResult } from '../types/training'
 
 const PROFILE_KEY = 'modelgym.trainingProfiles.v1'
 const JOB_KEY = 'modelgym.trainingJobs.preview.v1'
+const DELETED_JOB_KEY = 'modelgym.trainingJobs.deleted.preview.v1'
+
+export const DEFAULT_TRAINING_PROJECT_COLOR = '#3b82f6'
+const PROJECT_COLORS = [DEFAULT_TRAINING_PROJECT_COLOR, '#8b5cf6', '#10b981', '#f59e0b', '#ec4899', '#06b6d4', '#f97316', '#6366f1']
+const PROJECT_COLOR_PATTERN = /^#[\da-f]{6}$/i
+
+function projectName(profile: TrainingProfile): string { return profile.projectName?.trim() ?? '' }
+function projectColor(profile: TrainingProfile): string {
+  return projectName(profile) && PROJECT_COLOR_PATTERN.test(profile.projectColor ?? '') ? profile.projectColor!.toLowerCase() : DEFAULT_TRAINING_PROJECT_COLOR
+}
+
+export function trainingProjectIndex(profiles: TrainingProfile[]): { name: string; color: string; count: number }[] {
+  const groups = new Map<string, { name: string; color: string; count: number }>()
+  for (const profile of profiles) {
+    const name = projectName(profile)
+    const group = groups.get(name)
+    if (group) group.count += 1
+    else groups.set(name, { name, color: projectColor(profile), count: 1 })
+  }
+  return [...groups.values()].sort((left, right) => !left.name ? 1 : !right.name ? -1 : left.name.localeCompare(right.name, 'zh-CN'))
+}
+
+export function trainingProjectColor(name: string, profiles: TrainingProfile[]): string {
+  const normalized = name.trim()
+  if (!normalized) return DEFAULT_TRAINING_PROJECT_COLOR
+  const groups = trainingProjectIndex(profiles)
+  const existing = groups.find((group) => group.name === normalized)
+  if (existing) return existing.color
+  const used = new Set(groups.filter((group) => group.name).map((group) => group.color))
+  const preset = PROJECT_COLORS.find((color) => !used.has(color))
+  if (preset) return preset
+  // Continue assigning unused RGB colors after the quick-access palette fills.
+  for (let index = 0; index <= used.size; index++) {
+    const color = '#' + (((groups.length + index + 1) * 0x9e3779) & 0xffffff).toString(16).padStart(6, '0')
+    if (!used.has(color)) return color
+  }
+  return DEFAULT_TRAINING_PROJECT_COLOR
+}
+
+function validateProject(profile: TrainingProfile): string | null {
+  const name = profile.projectName ?? ''
+  if (/[\0\r\n]/.test(name) || new TextEncoder().encode(name.trim()).byteLength > 120) return '项目名称不能包含换行、空字符，且不能超过 120 字节。'
+  if (profile.projectColor !== undefined && !PROJECT_COLOR_PATTERN.test(profile.projectColor)) return '项目重点色必须为 #RRGGBB 格式。'
+  return null
+}
 
 type TrainingServer = Pick<Server, 'host' | 'name' | 'username' | 'sshAlias'>
 
@@ -62,6 +108,8 @@ export function datalistCommandPreview(profile: TrainingProfile): string {
 
 export function validateTrainingProfile(profile: TrainingProfile, requireGpu = true): string | null {
   if (!profile.name.trim()) return '请填写训练名称。'
+  const projectIssue = validateProject(profile)
+  if (projectIssue) return projectIssue
   if (!profile.serverId) return '请选择训练服务器。'
   if (!profile.workingDirectory.trim()) return '请填写服务器工作目录。'
   if (!profile.interpreter.trim()) return '请填写 Python、Conda 或 torchrun 启动前缀。'
@@ -114,8 +162,14 @@ export const trainingApi = {
   },
   async saveProfile(profile: TrainingProfile): Promise<TrainingProfile> {
     if (api.isDesktop) return invoke('training_save_profile', { profile })
-    const saved = { ...profile, updatedAt: Math.floor(Date.now() / 1000) }
-    writePreview(PROFILE_KEY, [saved, ...readPreview<TrainingProfile>(PROFILE_KEY).filter((item) => item.id !== profile.id)])
+    const issue = validateProject(profile)
+    if (issue) throw new Error(issue)
+    const profiles = readPreview<TrainingProfile>(PROFILE_KEY)
+    const name = projectName(profile)
+    const color = name ? (profile.projectColor?.toLowerCase() ?? DEFAULT_TRAINING_PROJECT_COLOR) : DEFAULT_TRAINING_PROJECT_COLOR
+    const saved = { ...profile, projectName: name, projectColor: color, updatedAt: Math.floor(Date.now() / 1000) }
+    const remaining = profiles.filter((item) => item.id !== profile.id).map((item) => projectName(item) === name ? { ...item, projectName: name, projectColor: color } : item)
+    writePreview(PROFILE_KEY, [saved, ...remaining])
     return saved
   },
   async deleteProfile(profileId: string): Promise<void> {
@@ -131,9 +185,11 @@ export const trainingApi = {
   },
   async submit(jobId: string, profile: TrainingProfile, queueIfBusy: boolean): Promise<TrainingSubmitResult> {
     if (api.isDesktop) return invoke('training_submit', { jobId, profile, queueIfBusy })
-    const existing = readPreview<TrainingJob>(JOB_KEY).find((job) => job.id === jobId)
+    if (readPreview<{ serverId: string; jobId: string }>(DELETED_JOB_KEY).some((item) => item.serverId === profile.serverId && item.jobId === jobId)) throw new Error('此训练任务记录已删除，请新建任务。')
+    const existing = readPreview<TrainingJob>(JOB_KEY).find((job) => job.id === jobId && job.serverId === profile.serverId)
     if (existing) return { job: existing, requiresQueueConfirmation: false, reasons: [] }
     const check = await this.checkPaths(profile)
+    if (readPreview<{ serverId: string; jobId: string }>(DELETED_JOB_KEY).some((item) => item.serverId === profile.serverId && item.jobId === jobId)) throw new Error('此训练任务记录已删除，请新建任务。')
     const selected = check.gpus.filter((gpu) => profile.gpuUuids.includes(gpu.uuid))
     const reasons = selected.flatMap((gpu) => trainingQueueReasons(gpu, profile.minimumFreeMemoryGb).map((reason) => `GPU ${gpu.index}：${reason}`))
     if (selected.length !== profile.gpuUuids.length) reasons.push('所选 GPU 不在当前快照中')
@@ -157,6 +213,22 @@ export const trainingApi = {
     const cancelled: TrainingJob = { ...found, status: 'cancelled', waitingReason: '用户取消', endedAt: Math.floor(Date.now() / 1000) }
     writePreview(JOB_KEY, jobs.map((job) => job.id === jobId && job.serverId === serverId ? cancelled : job))
     return cancelled
+  },
+  async deleteJobs(serverId: string, jobIds: string[]): Promise<TrainingDeleteJobsResult> {
+    if (api.isDesktop) return invoke('training_delete_jobs', { serverId, jobIds })
+    if (jobIds.length > 200) throw new Error('每次最多删除 200 条任务记录。')
+    const jobs = readPreview<TrainingJob>(JOB_KEY)
+    const result: TrainingDeleteJobsResult = { deletedJobIds: [], failures: [] }
+    for (const jobId of new Set(jobIds)) {
+      const job = jobs.find((item) => item.serverId === serverId && item.id === jobId)
+      if (job && (isActiveTrainingJob(job) || !['completed', 'failed', 'cancelled'].includes(job.status))) result.failures.push({ jobId, message: '仅可删除已结束的任务记录。' })
+      else result.deletedJobIds.push(jobId)
+    }
+    const deleted = new Set(result.deletedJobIds)
+    writePreview(JOB_KEY, jobs.filter((job) => job.serverId !== serverId || !deleted.has(job.id)))
+    const tombstones = readPreview<{ serverId: string; jobId: string }>(DELETED_JOB_KEY)
+    writePreview(DELETED_JOB_KEY, [...tombstones.filter((item) => item.serverId !== serverId || !deleted.has(item.jobId)), ...result.deletedJobIds.map((jobId) => ({ serverId, jobId }))])
+    return result
   },
   async readLog(serverId: string, jobId: string, lines = 400): Promise<string> {
     if (api.isDesktop) return invoke('training_read_log', { serverId, jobId, lines })

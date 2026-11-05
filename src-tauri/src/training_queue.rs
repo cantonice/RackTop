@@ -30,12 +30,19 @@ fn default_config_flag() -> String {
 fn default_minimum_free_memory_gb() -> f64 {
     10.0
 }
+fn default_project_color() -> String {
+    "#3b82f6".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrainingProfile {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub project_name: String,
+    #[serde(default = "default_project_color")]
+    pub project_color: String,
     pub server_id: String,
     pub working_directory: String,
     #[serde(default = "default_interpreter")]
@@ -125,6 +132,27 @@ pub struct TrainingSubmission {
     pub reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingDeletionFailure {
+    pub job_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingDeletionResult {
+    pub deleted_job_ids: Vec<String>,
+    pub failures: Vec<TrainingDeletionFailure>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrainingRemoteState {
+    jobs: Vec<TrainingJob>,
+    deleted_job_ids: Vec<String>,
+}
+
 pub struct TrainingStore {
     connection: Mutex<Connection>,
 }
@@ -141,7 +169,8 @@ impl TrainingStore {
         connection.execute_batch("PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS training_profiles(id TEXT PRIMARY KEY,server_id TEXT NOT NULL,payload TEXT NOT NULL,updated_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS training_servers(server_id TEXT PRIMARY KEY);
-            CREATE TABLE IF NOT EXISTS training_jobs(server_id TEXT NOT NULL,id TEXT NOT NULL,payload TEXT NOT NULL,created_at REAL NOT NULL,PRIMARY KEY(server_id,id));")
+            CREATE TABLE IF NOT EXISTS training_jobs(server_id TEXT NOT NULL,id TEXT NOT NULL,payload TEXT NOT NULL,created_at REAL NOT NULL,PRIMARY KEY(server_id,id));
+            CREATE TABLE IF NOT EXISTS training_job_deletions(server_id TEXT NOT NULL,id TEXT NOT NULL,deleted_at REAL NOT NULL,PRIMARY KEY(server_id,id));")
             .map_err(|error| error.to_string())?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -167,17 +196,42 @@ impl TrainingStore {
         validate_profile(&profile, false)?;
         let timestamp = unix_now();
         profile.name = profile.name.trim().to_string();
+        profile.project_name = profile.project_name.trim().to_string();
+        profile.project_color = if profile.project_name.is_empty() {
+            default_project_color()
+        } else {
+            profile.project_color.to_ascii_lowercase()
+        };
         profile.created_at = Some(profile.created_at.unwrap_or(timestamp));
         profile.updated_at = Some(timestamp);
         let payload = serde_json::to_string(&profile).map_err(|error| error.to_string())?;
-        let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        connection.execute("INSERT INTO training_profiles(id,server_id,payload,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET server_id=excluded.server_id,payload=excluded.payload,updated_at=excluded.updated_at", params![profile.id, profile.server_id, payload, timestamp]).map_err(|error| error.to_string())?;
-        connection
+        let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        // Project metadata lives in profile payloads. Update a shared color in
+        // the same transaction, while preserving existing profile ordering and
+        // immutable snapshots in training_jobs.
+        let existing = {
+            let mut statement = transaction.prepare("SELECT payload FROM training_profiles WHERE id<>?1").map_err(|error| error.to_string())?;
+            let rows = statement.query_map([&profile.id], |row| row.get::<_, String>(0)).map_err(|error| error.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+        };
+        for value in existing {
+            let mut other: TrainingProfile = serde_json::from_str(&value).map_err(|error| error.to_string())?;
+            if other.project_name.trim() == profile.project_name {
+                other.project_name = profile.project_name.clone();
+                other.project_color = profile.project_color.clone();
+                let payload = serde_json::to_string(&other).map_err(|error| error.to_string())?;
+                transaction.execute("UPDATE training_profiles SET payload=?1 WHERE id=?2", params![payload, other.id]).map_err(|error| error.to_string())?;
+            }
+        }
+        transaction.execute("INSERT INTO training_profiles(id,server_id,payload,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET server_id=excluded.server_id,payload=excluded.payload,updated_at=excluded.updated_at", params![profile.id, profile.server_id, payload, timestamp]).map_err(|error| error.to_string())?;
+        transaction
             .execute(
                 "INSERT OR IGNORE INTO training_servers(server_id) VALUES(?1)",
                 [&profile.server_id],
             )
             .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
         Ok(profile)
     }
 
@@ -215,18 +269,59 @@ impl TrainingStore {
             .map_err(|error| error.to_string())
     }
 
-    fn cache_job(&self, job: &TrainingJob) -> Result<(), String> {
+    fn cache_job(&self, job: &TrainingJob) -> Result<bool, String> {
         validate_id(&job.id)?;
         let payload = serde_json::to_string(job).map_err(|error| error.to_string())?;
-        self.connection.lock().map_err(|error| error.to_string())?.execute("INSERT INTO training_jobs(server_id,id,payload,created_at) VALUES(?1,?2,?3,?4) ON CONFLICT(server_id,id) DO UPDATE SET payload=excluded.payload,created_at=excluded.created_at", params![job.server_id, job.id, payload, job.created_at]).map_err(|error| error.to_string())?;
-        Ok(())
+        let changed = self.connection.lock().map_err(|error| error.to_string())?.execute("INSERT INTO training_jobs(server_id,id,payload,created_at) SELECT ?1,?2,?3,?4 WHERE NOT EXISTS(SELECT 1 FROM training_job_deletions WHERE server_id=?1 AND id=?2) ON CONFLICT(server_id,id) DO UPDATE SET payload=excluded.payload,created_at=excluded.created_at", params![job.server_id, job.id, payload, job.created_at]).map_err(|error| error.to_string())?;
+        Ok(changed > 0)
+    }
+
+    fn delete_cached_jobs(&self, server_id: &str, job_ids: &[String]) -> Result<(), String> {
+        for id in job_ids { validate_id(id)?; }
+        let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        for id in job_ids {
+            transaction.execute("INSERT OR IGNORE INTO training_job_deletions(server_id,id,deleted_at) VALUES(?1,?2,?3)", params![server_id, id, unix_now()]).map_err(|error| error.to_string())?;
+            transaction.execute("DELETE FROM training_jobs WHERE server_id=?1 AND id=?2", params![server_id, id]).map_err(|error| error.to_string())?;
+        }
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    fn sync_remote_state(&self, server_id: &str, state: TrainingRemoteState) -> Result<Vec<TrainingJob>, String> {
+        // A delete acknowledgement may be lost after the remote logs are gone.
+        // Explicit completed tombstones reconcile that case without treating
+        // missing jobs in an older list response as deletions of newer submits.
+        for id in &state.deleted_job_ids { validate_id(id)?; }
+        for job in &state.jobs {
+            validate_id(&job.id)?;
+            if job.server_id != server_id { return Err("远端训练队列包含其他服务器的任务标识".into()); }
+        }
+        let deleted: Vec<String> = state.deleted_job_ids.into_iter().map(|id| id.to_ascii_lowercase()).collect();
+        self.delete_cached_jobs(server_id, &deleted)?;
+        let mut jobs = Vec::new();
+        for job in state.jobs {
+            if self.cache_job(&job)? { jobs.push(job); }
+        }
+        Ok(jobs)
+    }
+
+    fn filter_deleted_jobs(&self, jobs: Vec<TrainingJob>) -> Result<Vec<TrainingJob>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare("SELECT EXISTS(SELECT 1 FROM training_job_deletions WHERE server_id=?1 AND id=?2)").map_err(|error| error.to_string())?;
+        jobs.into_iter().filter_map(|job| {
+            match statement.query_row(params![job.server_id, job.id], |row| row.get::<_, bool>(0)) {
+                Ok(true) => None,
+                Ok(false) => Some(Ok(job)),
+                Err(error) => Some(Err(error.to_string())),
+            }
+        }).collect()
     }
 
     fn cached_jobs(&self, server_id: &str) -> Result<Vec<TrainingJob>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let mut statement = connection
             .prepare(
-                "SELECT payload FROM training_jobs WHERE server_id=?1 ORDER BY created_at DESC,id",
+                "SELECT payload FROM training_jobs j WHERE server_id=?1 AND NOT EXISTS(SELECT 1 FROM training_job_deletions d WHERE d.server_id=j.server_id AND d.id=j.id) ORDER BY created_at DESC,id",
             )
             .map_err(|error| error.to_string())?;
         let rows = statement
@@ -274,6 +369,13 @@ fn validate_text(
 
 fn validate_profile(profile: &TrainingProfile, require_gpus: bool) -> Result<(), String> {
     validate_id(&profile.id)?;
+    validate_text(profile.project_name.trim(), "项目名称", 120, true)?;
+    if profile.project_name.chars().any(|character| matches!(character, '\0' | '\n' | '\r')) {
+        return Err("项目名称包含无效字符".into());
+    }
+    if profile.project_color.len() != 7 || !profile.project_color.starts_with('#') || !profile.project_color[1..].bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("项目重点色必须为 #RRGGBB 格式".into());
+    }
     for (value, label, maximum, allow_empty) in [
         (profile.name.as_str(), "配置名称", 240, false),
         (&profile.server_id, "服务器标识", 200, false),
@@ -511,7 +613,7 @@ pub async fn training_submit(
     )
     .await?;
     if let Some(job) = &response.job {
-        training.cache_job(job)?;
+        if !training.cache_job(job)? { return Err("此训练任务记录已删除，请新建任务".into()); }
     }
     Ok(response)
 }
@@ -540,13 +642,13 @@ pub async fn training_list_jobs(
         let credential = password(&database, &server, false);
         let permits = semaphore.clone();
         requests.spawn(async move {
-            let result: Result<Vec<TrainingJob>, String> = match credential {
+            let result: Result<TrainingRemoteState, String> = match credential {
                 Ok(credential) => match permits.acquire_owned().await {
                     Ok(_permit) => {
                         remote_with_timeout(
                             &server,
                             credential.as_deref(),
-                            json!({"action":"list"}),
+                            json!({"action":"list_state"}),
                             Duration::from_secs(15),
                         )
                         .await
@@ -561,11 +663,8 @@ pub async fn training_list_jobs(
     while let Some(completed) = requests.join_next().await {
         let (id, result) = completed.map_err(|error| format!("训练队列状态查询失败：{error}"))?;
         match result {
-            Ok(remote_jobs) => {
-                for job in remote_jobs {
-                    training.cache_job(&job)?;
-                    jobs.push(job);
-                }
+            Ok(state) => {
+                jobs.extend(training.sync_remote_state(&id, state)?);
             }
             Err(error) => {
                 connection_errors.push(format!("{id}: {error}"));
@@ -576,6 +675,7 @@ pub async fn training_list_jobs(
             }
         }
     }
+    let mut jobs = training.filter_deleted_jobs(jobs)?;
     if jobs.is_empty() && !connection_errors.is_empty() {
         return Err(format!("无法读取远端训练队列：{}", connection_errors.join("；")));
     }
@@ -604,8 +704,43 @@ pub async fn training_cancel_job(
         json!({"action":"cancel","jobId":job_id}),
     )
     .await?;
-    training.cache_job(&job)?;
+    if !training.cache_job(&job)? { return Err("此训练任务记录已删除".into()); }
     Ok(job)
+}
+
+fn validate_deletion_result(requested: &[String], result: &TrainingDeletionResult) -> Result<(), String> {
+    let requested: BTreeSet<_> = requested.iter().collect();
+    let mut returned = BTreeSet::new();
+    for id in result.deleted_job_ids.iter().chain(result.failures.iter().map(|failure| &failure.job_id)) {
+        if !requested.contains(id) || !returned.insert(id) {
+            return Err("远端删除结果包含未知或重复的任务标识，未清理本地记录".into());
+        }
+    }
+    if requested != returned {
+        return Err("远端删除结果不完整，未清理本地记录，请重试".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn training_delete_jobs(
+    database: State<'_, Database>,
+    training: State<'_, TrainingStore>,
+    server_id: String,
+    job_ids: Vec<String>,
+) -> Result<TrainingDeletionResult, String> {
+    if job_ids.len() > 200 { return Err("每次最多删除 200 条任务记录".into()); }
+    for id in &job_ids { validate_id(id)?; }
+    let job_ids: Vec<String> = job_ids.into_iter().map(|id| id.to_ascii_lowercase()).collect::<BTreeSet<_>>().into_iter().collect();
+    if job_ids.is_empty() { return Ok(TrainingDeletionResult { deleted_job_ids: vec![], failures: vec![] }); }
+    let server = database.get_server(&server_id)?;
+    let credential = password(&database, &server, true)?;
+    let result: TrainingDeletionResult = remote(&server, credential.as_deref(), json!({"action":"delete_jobs","jobIds":job_ids})).await?;
+    validate_deletion_result(&job_ids, &result)?;
+    // An unavailable endpoint leaves local records intact: only a remote
+    // acknowledgement can confirm that its managed logs have been removed.
+    training.delete_cached_jobs(&server_id, &result.deleted_job_ids)?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -631,6 +766,140 @@ mod tests {
     use super::*;
     fn profile() -> TrainingProfile {
         serde_json::from_value(json!({"id":"12345678-1234-4234-8234-123456789abc","name":"训练","serverId":"s1","workingDirectory":"/data/train","interpreter":"python -u","scriptPath":"train.py","configPath":"config.yaml","configMode":"flag","configFlag":"--config","extraArguments":"","gpuUuids":["GPU-a"],"minimumFreeMemoryGb":8})).unwrap()
+    }
+    fn job(id: &str, server_id: &str) -> TrainingJob {
+        serde_json::from_value(json!({
+            "id":id,"profileId":profile().id,"name":"训练","serverId":server_id,
+            "profile":profile(),"gpuUuids":["GPU-a"],"gpuIndices":[0],"command":"python train.py config.yaml",
+            "status":"completed","waitingReason":"","createdAt":123.0,"startedAt":124.0,"endedAt":125.0,
+            "pid":null,"exitCode":0,"logPath":"/managed/output.log"
+        })).unwrap()
+    }
+    #[test]
+    fn projects_default_to_unclassified_and_validate_trimmed_utf8_names_and_colors() {
+        let mut configured = profile();
+        assert_eq!(configured.project_name, "");
+        assert_eq!(configured.project_color, "#3b82f6");
+        configured.project_name = format!(" {} ", "数".repeat(40));
+        configured.project_color = "#ABC123".into();
+        assert!(validate_profile(&configured, false).is_ok());
+        configured.project_name = "数".repeat(41);
+        assert!(validate_profile(&configured, false).unwrap_err().contains("项目名称"));
+        for name in ["project\n", "project\r", "project\0"] {
+            configured.project_name = name.into();
+            assert!(validate_profile(&configured, false).is_err());
+        }
+        configured.project_name = "Detection".into();
+        for color in ["red", "#abc", "#12345g", "#12345678", ""] {
+            configured.project_color = color.into();
+            assert!(validate_profile(&configured, false).unwrap_err().contains("#RRGGBB"));
+        }
+    }
+    #[test]
+    fn shared_project_colors_survive_reopen_without_rewriting_job_snapshots_or_other_projects() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("modelgym-training.sqlite");
+        let store = TrainingStore::open(&path).unwrap();
+        let mut first = profile();
+        first.project_name = " Detection ".into();
+        first.project_color = "#ABC123".into();
+        let first = store.save_profile(first).unwrap();
+        let mut snapshot = job("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "s1");
+        snapshot.profile = first.clone();
+        store.cache_job(&snapshot).unwrap();
+        let mut other = profile();
+        other.id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into();
+        other.project_name = "Segmentation".into();
+        other.project_color = "#10b981".into();
+        store.save_profile(other.clone()).unwrap();
+        let mut second = profile();
+        second.id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc".into();
+        second.project_name = "Detection".into();
+        second.project_color = "#8B5CF6".into();
+        store.save_profile(second).unwrap();
+        let store = TrainingStore::open(&path).unwrap();
+        let profiles = store.list_profiles().unwrap();
+        assert_eq!(profiles.iter().filter(|p| p.project_name == "Detection" && p.project_color == "#8b5cf6").count(), 2);
+        assert_eq!(profiles.iter().find(|p| p.id == first.id).unwrap().updated_at, first.updated_at);
+        assert_eq!(profiles.iter().find(|p| p.id == other.id).unwrap().project_color, "#10b981");
+        assert_eq!(store.cached_jobs("s1").unwrap()[0].profile.project_color, "#abc123");
+    }
+    #[test]
+    fn remote_confirmed_deletions_block_stale_cache_and_lists_after_reopen_and_preserve_other_servers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("modelgym-training.sqlite");
+        let store = TrainingStore::open(&path).unwrap();
+        let deleted = job("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "s1");
+        let kept = job("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "s1");
+        let sibling = job(&deleted.id, "s2");
+        for item in [&deleted, &kept, &sibling] { assert!(store.cache_job(item).unwrap()); }
+        let old_list = vec![deleted.clone(), kept.clone(), sibling.clone()];
+        store.delete_cached_jobs("s1", &[deleted.id.clone()]).unwrap();
+        assert!(!store.cache_job(&deleted).unwrap());
+        assert_eq!(store.filter_deleted_jobs(old_list).unwrap().len(), 2);
+        let store = TrainingStore::open(&path).unwrap();
+        assert_eq!(store.cached_jobs("s1").unwrap().iter().map(|item| &item.id).collect::<Vec<_>>(), vec![&kept.id]);
+        assert_eq!(store.cached_jobs("s2").unwrap()[0].id, sibling.id);
+        assert!(!store.cache_job(&deleted).unwrap());
+        // Idempotent acknowledgements can repeat after a lost response.
+        store.delete_cached_jobs("s1", &[deleted.id]).unwrap();
+        assert_eq!(store.cached_jobs("s1").unwrap().len(), 1);
+    }
+    #[test]
+    fn list_state_recovers_lost_delete_acknowledgements_without_dropping_newer_cached_submits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("modelgym-training.sqlite");
+        let store = TrainingStore::open(&path).unwrap();
+        let deleted = job("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "s1");
+        let mut pending = job("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "s1");
+        pending.waiting_reason = "删除日志失败，请重试".into();
+        let mut newer = job("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "s1");
+        newer.status = "queued".into();
+        for item in [&deleted, &pending, &newer] { assert!(store.cache_job(item).unwrap()); }
+        // The SSH delete reply was lost, so only the next list's explicit
+        // completed tombstone informs the client that the record is gone.
+        let state: TrainingRemoteState = serde_json::from_value(json!({
+            "jobs":[pending],"deletedJobIds":[deleted.id.to_ascii_uppercase()]
+        })).unwrap();
+        let listed = store.sync_remote_state("s1", state).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, pending.id);
+        let store = TrainingStore::open(&path).unwrap();
+        // The offline path reads this cache after restart. Pending cleanup and
+        // a submit newer than the list snapshot survive; deleted logs do not.
+        let offline = store.cached_jobs("s1").unwrap();
+        assert_eq!(offline.len(), 2);
+        assert!(offline.iter().any(|item| item.id == pending.id));
+        assert!(offline.iter().any(|item| item.id == newer.id));
+        assert!(!store.cache_job(&deleted).unwrap());
+        let stale = store.sync_remote_state("s1", TrainingRemoteState { jobs:vec![deleted],deleted_job_ids:vec![] }).unwrap();
+        assert!(stale.is_empty());
+    }
+    #[test]
+    fn invalid_list_state_cannot_partially_delete_cache_or_silently_use_legacy_lists() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = TrainingStore::open(&directory.path().join("modelgym-training.sqlite")).unwrap();
+        let kept = job("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "s1");
+        store.cache_job(&kept).unwrap();
+        let malformed = TrainingRemoteState { jobs:vec![],deleted_job_ids:vec![kept.id.clone(),"../bad".into()] };
+        assert!(store.sync_remote_state("s1", malformed).is_err());
+        assert_eq!(store.cached_jobs("s1").unwrap().len(), 1);
+        let wrong_server = TrainingRemoteState { jobs:vec![job(&kept.id, "s2")],deleted_job_ids:vec![kept.id.clone()] };
+        assert!(store.sync_remote_state("s1", wrong_server).is_err());
+        assert_eq!(store.cached_jobs("s1").unwrap().len(), 1);
+        assert!(serde_json::from_value::<TrainingRemoteState>(json!([])).is_err());
+        assert!(serde_json::from_value::<TrainingRemoteState>(json!({"jobs":[]})).is_err());
+    }
+    #[test]
+    fn only_complete_unambiguous_remote_deletion_results_can_change_local_records() {
+        let requested = vec!["one".into(), "two".into()];
+        let partial = TrainingDeletionResult { deleted_job_ids: vec!["one".into()], failures: vec![TrainingDeletionFailure { job_id:"two".into(),message:"still running".into() }] };
+        assert!(validate_deletion_result(&requested, &partial).is_ok());
+        for invalid in [
+            TrainingDeletionResult { deleted_job_ids: vec!["one".into()], failures: vec![] },
+            TrainingDeletionResult { deleted_job_ids: vec!["one".into(), "unknown".into()], failures: vec![] },
+            TrainingDeletionResult { deleted_job_ids: vec!["one".into(), "two".into()], failures: partial.failures.clone() },
+        ] { assert!(validate_deletion_result(&requested, &invalid).is_err()); }
     }
     #[test]
     fn missing_config_mode_defaults_to_positional_and_explicit_flag_is_preserved() {

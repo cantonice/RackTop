@@ -49,7 +49,14 @@ export function useTrainingCompletionNotifications(enabled = true): { alerts: Tr
   const observationsRef = useRef<Observations | null>(null)
   const baselineRef = useRef(new Set<string>())
   const pollingRef = useRef(false)
-  const dismiss = useCallback((id: string) => setAlerts((current) => current.filter((alert) => alert.id !== id)), [])
+  const dismiss = useCallback((id: string) => {
+    const observations = observationsRef.current ?? (observationsRef.current = readObservations())
+    observations.active.delete(id)
+    observations.seen.add(id)
+    baselineRef.current.delete(id)
+    saveObservations(observations)
+    setAlerts((current) => current.filter((alert) => alert.id !== id))
+  }, [])
   const observeJob = useCallback((job: TrainingJob) => {
     const observations = observationsRef.current ?? (observationsRef.current = readObservations())
     const id = jobIdentity(job)

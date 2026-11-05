@@ -18,6 +18,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -69,7 +70,7 @@ def now():
 
 def bootstrap():
     os.umask(0o077)
-    for directory in (STATE_DIR, STATE_DIR / "jobs"):
+    for directory in (STATE_DIR, STATE_DIR / "jobs", STATE_DIR / "deleted-jobs"):
         if directory.is_symlink():
             raise ValueError("训练队列目录不能是符号链接")
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -332,11 +333,59 @@ def job_path(job_id):
     return STATE_DIR / "jobs" / validate_id(job_id) / "job.json"
 
 
-def load_job(job_id):
-    path = job_path(job_id)
+def deleted_job_path(job_id):
+    return STATE_DIR / "deleted-jobs" / (validate_id(job_id) + ".json")
+
+
+def deletion_record(job_id):
+    path = deleted_job_path(job_id)
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError("训练任务删除标记不是普通文件，操作已停止")
     try:
         with open(path, encoding="utf-8") as handle:
-            job = json.load(handle)
+            record = json.load(handle)
+        if not isinstance(record, dict) or record.get("id") != validate_id(job_id) or record.get("state") not in ("pending", "deleted"):
+            raise ValueError("删除标记无效")
+        if record["state"] == "pending" and (not isinstance(record.get("job"), dict) or record["job"].get("status") not in TERMINAL):
+            raise ValueError("待重试删除记录无效")
+        return record
+    except FileNotFoundError:
+        return None
+    except (ValueError, UnicodeError, OSError) as error:
+        raise ValueError("训练任务删除标记损坏或不可读，操作已停止") from error
+
+
+def is_deleted(job_id):
+    # Pending cleanup must also block old submit/save retries.
+    return deletion_record(job_id) is not None
+
+
+def persist_deletion_record(job_id, record):
+    atomic_json(deleted_job_path(job_id), record)
+    if os.name != "nt":
+        # The marker must survive a crash before any durable job/log removal.
+        # Sync STATE_DIR too because bootstrap may have just created this folder.
+        for path in (STATE_DIR / "deleted-jobs", STATE_DIR):
+            descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+
+
+def load_job(job_id):
+    deletion = deletion_record(job_id)
+    if deletion and deletion["state"] == "deleted":
+        return None
+    path = job_path(job_id)
+    try:
+        if deletion:
+            # Keep failed cleanups visible and retryable even if job.json was
+            # already unlinked before rmdir or the final marker write failed.
+            job = deletion["job"]
+        else:
+            with open(path, encoding="utf-8") as handle:
+                job = json.load(handle)
     except FileNotFoundError:
         return None
     except (ValueError, UnicodeError, OSError) as error:
@@ -380,6 +429,8 @@ def load_job(job_id):
 
 
 def save_job(job):
+    if is_deleted(job["id"]):
+        raise ValueError("训练任务已删除，不能恢复原任务记录")
     path = job_path(job["id"])
     path.parent.mkdir(mode=0o700, exist_ok=True)
     atomic_json(path, job)
@@ -387,9 +438,11 @@ def save_job(job):
 
 def all_jobs(errors=None):
     jobs = []
-    for path in (STATE_DIR / "jobs").glob("*/job.json"):
+    job_ids = {path.parent.name for path in (STATE_DIR / "jobs").glob("*/job.json")}
+    job_ids.update(path.stem for path in (STATE_DIR / "deleted-jobs").glob("*.json"))
+    for job_id in sorted(job_ids):
         try:
-            job = load_job(path.parent.name)
+            job = load_job(job_id)
         except ValueError as error:
             if errors is None:
                 raise
@@ -453,12 +506,12 @@ def signal_job(job, value):
                 pass
 
 
-def reconcile(job, timestamp):
+def reconcile(job, timestamp, escalate_cancellation=True):
     if job.get("datalistStatus") == "running":
         stage = datalist_process(job)
         alive = identity_alive(stage.get("processIdentity"))
         descendants = [] if alive else owned_group_members(stage)
-        if job.get("cancelRequestedAt") is not None and timestamp - job["cancelRequestedAt"] >= CANCEL_GRACE_SECONDS:
+        if escalate_cancellation and job.get("cancelRequestedAt") is not None and timestamp - job["cancelRequestedAt"] >= CANCEL_GRACE_SECONDS:
             signal_job(stage, KILL_SIGNAL)
             alive = identity_alive(stage.get("processIdentity"))
             descendants = [] if alive else owned_group_members(stage)
@@ -470,7 +523,7 @@ def reconcile(job, timestamp):
         return job
     alive = identity_alive(job.get("processIdentity"))
     descendants = [] if alive else owned_group_members(job)
-    if job.get("cancelRequestedAt") is not None and timestamp - job["cancelRequestedAt"] >= CANCEL_GRACE_SECONDS:
+    if escalate_cancellation and job.get("cancelRequestedAt") is not None and timestamp - job["cancelRequestedAt"] >= CANCEL_GRACE_SECONDS:
         signal_job(job, KILL_SIGNAL)
         alive = identity_alive(job.get("processIdentity"))
         descendants = owned_group_members(job) if not alive else []
@@ -522,6 +575,8 @@ def ensure_daemon():
 def submit(job_id, profile, allow_queue):
     job_id = validate_id(job_id)
     with lock():
+        if is_deleted(job_id):
+            raise ValueError("训练任务已删除，不能重复提交原任务；请创建新的训练任务")
         existing = load_job(job_id)
         if existing:
             if existing["specHash"] != spec_hash(profile):
@@ -765,19 +820,123 @@ def read_log(job_id, lines):
         return "尚未启动训练，暂无日志。"
 
 
+def managed_job_filename(name):
+    return name in ("job.json", "output.log") or re.fullmatch(r"job\.json\.[0-9a-f]{32}\.tmp", name) is not None
+
+
+def checked_job_directory(job_id):
+    """Only ordinary files below this worker's UUID directory may be removed."""
+    directory = job_path(job_id).parent
+    root = STATE_DIR / "jobs"
+    if root.is_symlink() or directory.is_symlink() or directory.resolve() != root.resolve() / validate_id(job_id):
+        raise ValueError("训练任务目录包含符号链接或越界路径，未删除数据")
+    if not directory.exists():
+        return directory
+    if not directory.is_dir():
+        raise ValueError("训练任务目录不是普通目录，未删除数据")
+    # The worker only creates these flat files. Unknown data is left untouched
+    # for inspection; project paths/logPath never choose the cleanup target.
+    for path in directory.iterdir():
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode) or getattr(path, "is_junction", lambda: False)():
+            raise ValueError("训练任务目录含符号链接，未删除数据")
+        if not stat.S_ISREG(mode) or not managed_job_filename(path.name):
+            raise ValueError("训练任务目录含非受管文件或子目录，未删除数据")
+    return directory
+
+
+def remove_job_directory(directory):
+    if os.name != "nt":
+        # Pin both directory descriptors and never follow a replacement link.
+        # Production workers are Linux; the path branch is only the Windows
+        # deterministic test harness and still never performs recursive removal.
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        parent = os.open(STATE_DIR / "jobs", flags)
+        try:
+            try:
+                descriptor = os.open(directory.name, flags, dir_fd=parent)
+            except FileNotFoundError:
+                return
+            try:
+                names = os.listdir(descriptor)
+                for name in names:
+                    if not managed_job_filename(name) or not stat.S_ISREG(os.stat(name, dir_fd=descriptor, follow_symlinks=False).st_mode):
+                        raise ValueError("训练任务目录出现非受管文件或符号链接，未继续删除")
+                for name in sorted(names, key=lambda item: (item == "job.json", item)):
+                    os.unlink(name, dir_fd=descriptor)
+                os.fsync(descriptor)
+                os.rmdir(directory.name, dir_fd=parent)
+                os.fsync(parent)
+            finally:
+                os.close(descriptor)
+        finally:
+            os.close(parent)
+    elif directory.exists():
+        # Leave the original record until the logs/temporary files are removed.
+        # unlink never follows a replacement symlink; rmdir never recurses.
+        for path in sorted(directory.iterdir(), key=lambda item: (item.name == "job.json", item.name)):
+            if not managed_job_filename(path.name):
+                raise ValueError("训练任务目录出现非受管文件，未继续删除")
+            path.unlink()
+        directory.rmdir()
+
+
+def delete_jobs(job_ids):
+    if not isinstance(job_ids, list) or len(job_ids) > 200:
+        raise ValueError("每次请选择不超过 200 个训练任务")
+    deleted, failures, seen = [], [], set()
+    with lock():
+        for requested_id in job_ids:
+            try:
+                job_id = validate_id(requested_id)
+                if job_id in seen:
+                    continue
+                seen.add(job_id)
+                directory = checked_job_directory(job_id)
+                deletion = deletion_record(job_id)
+                if deletion is None or deletion["state"] == "pending":
+                    job = load_job(job_id)
+                    if job is None and directory.exists():
+                        raise ValueError("任务记录缺失，无法确认任务已结束；未删除数据")
+                    if job is not None:
+                        reconcile(job, now(), escalate_cancellation=False)
+                        if job["status"] not in TERMINAL:
+                            raise ValueError("只能删除已结束的训练任务，请先等待任务结束")
+                        for stage in (job, datalist_process(job)):
+                            if identity_alive(stage.get("processIdentity")) or owned_group_members(stage):
+                                raise ValueError("训练或 datalist 进程尚未完全退出，请稍后重试")
+                    if job is not None and deletion is None:
+                        # Preserve only record metadata while cleanup is pending,
+                        # so failures remain visible after polling/restarting.
+                        persist_deletion_record(job_id, {"id": job_id, "state": "pending", "job": job})
+                remove_job_directory(directory)
+                # Only the completed marker survives, with no profile/log data.
+                persist_deletion_record(job_id, {"id": job_id, "state": "deleted", "deletedAt": int(now())})
+                deleted.append(job_id)
+            except (ValueError, OSError, RuntimeError) as error:
+                failures.append({"jobId": requested_id if isinstance(requested_id, str) else str(requested_id), "message": str(error)[:800]})
+    return {"deletedJobIds": deleted, "failures": failures}
+
+
 def dispatch(request):
     action = request.get("action")
     if action == "check_paths":
         return check_paths(normalize_profile(request.get("profile")))[0]
     if action == "submit":
         return submit(request.get("jobId"), normalize_profile(request.get("profile"), require_gpus=True), request.get("queueIfBusy") is True)
-    if action == "list":
+    if action in ("list", "list_state"):
         with lock():
-            return [public_job(reconcile(job, now())) for job in all_jobs()]
+            jobs = [public_job(reconcile(job, now())) for job in all_jobs()]
+            if action == "list":
+                return jobs
+            deleted = [path.stem for path in sorted((STATE_DIR / "deleted-jobs").glob("*.json")) if deletion_record(path.stem)["state"] == "deleted"]
+            return {"jobs": jobs, "deletedJobIds": deleted}
     if action == "cancel":
         return cancel(validate_id(request.get("jobId")))
     if action == "read_log":
         return read_log(validate_id(request.get("jobId")), request.get("lines", 400))
+    if action == "delete_jobs":
+        return delete_jobs(request.get("jobIds"))
     raise ValueError("未知训练队列操作")
 
 

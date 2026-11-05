@@ -27,6 +27,7 @@ SPEC.loader.exec_module(queue)
 REAL_RUN = subprocess.run
 REAL_START_DATALIST = queue.start_datalist
 REAL_ENSURE_DAEMON = queue.ensure_daemon
+REAL_PERSIST_DELETION = queue.persist_deletion_record
 
 
 class TrainingQueueTests(unittest.TestCase):
@@ -588,6 +589,225 @@ else:
                 queue.tick()
             signal_job.assert_called_once()
             self.assertEqual(signal_job.call_args.args[1], queue.KILL_SIGNAL)
+
+    def ended_job(self, status="completed", profile=None):
+        job_id = str(uuid.uuid4())
+        queue.submit(job_id, profile or self.profile(), True)
+        job = queue.load_job(job_id)
+        job.update({"status": status, "endedAt": int(self.clock), "datalistStatus": "completed" if job["profile"].get("datalistScriptPath") else None, "datalistPid": None, "datalistProcessIdentity": None})
+        queue.save_job(job)
+        return job
+
+    def test_delete_ended_task_removes_managed_files_and_preserves_project_and_neighbors(self):
+        job = self.ended_job()
+        neighbor = self.ended_job("failed")
+        directory = queue.job_path(job["id"]).parent
+        (directory / "output.log").write_text("private training log", encoding="utf-8")
+        (directory / ("job.json." + uuid.uuid4().hex + ".tmp")).write_text("managed temporary data", encoding="utf-8")
+        output = self.workdir / "weights.pt"
+        output.write_text("user model", encoding="utf-8")
+        job["logPath"] = str(output)  # Metadata must never choose the cleanup target.
+        queue.save_job(job)
+        daemon = queue.STATE_DIR / "daemon.log"
+        daemon.write_text("queue log", encoding="utf-8")
+
+        result = queue.dispatch({"action": "delete_jobs", "jobIds": [job["id"]]})
+
+        self.assertEqual(result, {"deletedJobIds": [job["id"]], "failures": []})
+        self.assertFalse(directory.exists())
+        self.assertTrue(queue.deleted_job_path(job["id"]).is_file())
+        self.assertEqual(set(json.loads(queue.deleted_job_path(job["id"]).read_text(encoding="utf-8"))), {"id", "state", "deletedAt"})
+        self.assertEqual(output.read_text(encoding="utf-8"), "user model")
+        self.assertTrue(self.script.is_file())
+        self.assertTrue(self.config.is_file())
+        self.assertTrue(queue.job_path(neighbor["id"]).is_file())
+        self.assertEqual(daemon.read_text(encoding="utf-8"), "queue log")
+        self.assertIsNone(queue.load_job(job["id"]))
+        self.assertEqual([item["id"] for item in queue.dispatch({"action": "list"})], [neighbor["id"]])
+        self.assertEqual(queue.dispatch({"action": "list_state"})["deletedJobIds"], [job["id"]])
+        with self.assertRaisesRegex(ValueError, "已删除"):
+            queue.submit(job["id"], job["profile"], True)
+        with self.assertRaisesRegex(ValueError, "已删除"):
+            queue.save_job(job)
+        with self.assertRaisesRegex(ValueError, "不存在"):
+            queue.read_log(job["id"], 20)
+
+    def test_delete_batch_is_partial_deduplicated_and_retries_are_idempotent(self):
+        ended = [self.ended_job(status) for status in ("completed", "failed", "cancelled")]
+        active_id, missing_id = str(uuid.uuid4()), str(uuid.uuid4())
+        queue.submit(active_id, self.profile(), True)
+        ids = [ended[0]["id"], active_id, "../outside", ended[1]["id"], ended[2]["id"], missing_id, ended[0]["id"]]
+
+        result = queue.delete_jobs(ids)
+
+        expected = [job["id"] for job in ended] + [missing_id]
+        self.assertEqual(result["deletedJobIds"], expected)
+        self.assertEqual([item["jobId"] for item in result["failures"]], [active_id, "../outside"])
+        self.assertTrue(queue.job_path(active_id).is_file())
+        self.assertEqual(queue.delete_jobs(expected), {"deletedJobIds": expected, "failures": []})
+        self.assertEqual(queue.delete_jobs([]), {"deletedJobIds": [], "failures": []})
+        for value in (None, "not a list", [str(uuid.uuid4())] * 201):
+            with self.assertRaisesRegex(ValueError, "200"):
+                queue.delete_jobs(value)
+
+    def test_delete_reconciles_an_interrupted_runner_before_removing_it(self):
+        job = self.ended_job()
+        job.update({"status": "running", "pid": 9999, "processIdentity": {"pid": 9999, "startTicks": "10", "bootId": "previous-boot"}})
+        queue.save_job(job)
+        self.assertEqual(queue.delete_jobs([job["id"]]), {"deletedJobIds": [job["id"]], "failures": []})
+        self.assertFalse(queue.job_path(job["id"]).parent.exists())
+
+    def test_delete_does_not_signal_active_training_or_datalist_cancellation(self):
+        for datalist in (False, True):
+            with self.subTest(datalist=datalist):
+                job_id = str(uuid.uuid4())
+                queue.submit(job_id, self.datalist_profile() if datalist else self.profile(), True)
+                job = queue.load_job(job_id)
+                if not datalist:
+                    self.fake_launch(job, queue.probe_gpus()[0], self.clock)
+                job["cancelRequestedAt"] = self.clock - queue.CANCEL_GRACE_SECONDS - 1
+                queue.save_job(job)
+                with mock.patch.object(queue, "signal_job") as signal_job:
+                    result = queue.delete_jobs([job_id])
+                self.assertFalse(result["deletedJobIds"])
+                self.assertIn("只能删除已结束", result["failures"][0]["message"])
+                signal_job.assert_not_called()
+                self.assertFalse(queue.deleted_job_path(job_id).exists())
+                job.pop("cancelRequestedAt")
+                queue.save_job(job)
+
+    def test_terminal_status_cannot_delete_live_training_or_datalist_runners_or_descendants(self):
+        for stage in ("training", "datalist"):
+            for runner_alive in (True, False):
+                with self.subTest(stage=stage, runner_alive=runner_alive):
+                    job = self.ended_job(profile=self.datalist_profile() if stage == "datalist" else None)
+                    pid_field, identity_field = ("pid", "processIdentity") if stage == "training" else ("datalistPid", "datalistProcessIdentity")
+                    job.update({pid_field: 9876, identity_field: {"pid": 9876, "startTicks": "10", "bootId": "test-boot" if runner_alive else "previous-boot"}})
+                    queue.save_job(job)
+                    descendants = [] if runner_alive else [{"pid": 9877, "startTicks": "11", "bootId": "test-boot"}]
+                    with mock.patch.object(queue, "owned_group_members", side_effect=lambda view, exclude=None: descendants if view.get("pid") == 9876 else []), mock.patch.object(queue, "signal_job") as signal_job:
+                        result = queue.delete_jobs([job["id"]])
+                    self.assertEqual(result["deletedJobIds"], [])
+                    self.assertIn("尚未完全退出", result["failures"][0]["message"])
+                    self.assertTrue(queue.job_path(job["id"]).is_file())
+                    self.assertFalse(queue.deleted_job_path(job["id"]).exists())
+                    signal_job.assert_not_called()
+
+    def test_delete_writes_tombstone_before_cleanup_and_can_retry_a_partial_failure(self):
+        job = self.ended_job()
+        path = queue.job_path(job["id"])
+        (path.parent / "output.log").write_text("log", encoding="utf-8")
+        def interrupted_cleanup(directory):
+            self.assertTrue(queue.deleted_job_path(job["id"]).is_file())
+            path.unlink()
+            raise OSError("simulated unlink failure")
+        with mock.patch.object(queue, "remove_job_directory", side_effect=interrupted_cleanup):
+            result = queue.delete_jobs([job["id"]])
+        self.assertEqual(result["deletedJobIds"], [])
+        self.assertIn("simulated unlink failure", result["failures"][0]["message"])
+        self.assertEqual(queue.load_job(job["id"])["status"], "completed")
+        self.assertEqual(json.loads(queue.deleted_job_path(job["id"]).read_text(encoding="utf-8"))["state"], "pending")
+        with self.assertRaisesRegex(ValueError, "已删除"):
+            queue.submit(job["id"], job["profile"], True)
+        self.assertEqual([item["id"] for item in queue.dispatch({"action": "list"})], [job["id"]])
+        self.assertEqual(queue.dispatch({"action": "list_state"})["deletedJobIds"], [])
+        self.assertEqual(queue.delete_jobs([job["id"]]), {"deletedJobIds": [job["id"]], "failures": []})
+        self.assertFalse(path.parent.exists())
+
+    def test_delete_refuses_unknown_data_without_recursing_or_creating_a_tombstone(self):
+        for is_directory in (False, True):
+            with self.subTest(is_directory=is_directory):
+                job = self.ended_job()
+                directory = queue.job_path(job["id"]).parent
+                unexpected = directory / "user-data"
+                if is_directory:
+                    unexpected.mkdir()
+                    unexpected = unexpected / "weights.pt"
+                unexpected.write_text("user data", encoding="utf-8")
+                result = queue.delete_jobs([job["id"]])
+                self.assertEqual(result["deletedJobIds"], [])
+                self.assertIn("非受管", result["failures"][0]["message"])
+                self.assertEqual(unexpected.read_text(encoding="utf-8"), "user data")
+                self.assertTrue(queue.job_path(job["id"]).is_file())
+                self.assertFalse(queue.deleted_job_path(job["id"]).exists())
+
+    def test_delete_waits_for_a_durable_marker_before_unlinking(self):
+        job = self.ended_job()
+        path = queue.job_path(job["id"])
+        def failed_sync(job_id, record):
+            REAL_PERSIST_DELETION(job_id, record)
+            raise OSError("simulated marker fsync failure")
+        with mock.patch.object(queue, "persist_deletion_record", side_effect=failed_sync), mock.patch.object(queue, "remove_job_directory") as remove:
+            result = queue.delete_jobs([job["id"]])
+        self.assertFalse(result["deletedJobIds"])
+        self.assertIn("fsync failure", result["failures"][0]["message"])
+        remove.assert_not_called()
+        self.assertTrue(path.is_file())
+        self.assertEqual([item["id"] for item in queue.dispatch({"action": "list"})], [job["id"]])
+        self.assertEqual(queue.delete_jobs([job["id"]]), {"deletedJobIds": [job["id"]], "failures": []})
+
+    def test_delete_can_retry_when_final_marker_write_fails_after_directory_removal(self):
+        job = self.ended_job()
+        def fail_completed_marker(job_id, record):
+            if record["state"] == "deleted":
+                raise OSError("simulated final marker failure")
+            REAL_PERSIST_DELETION(job_id, record)
+        with mock.patch.object(queue, "persist_deletion_record", side_effect=fail_completed_marker):
+            result = queue.delete_jobs([job["id"]])
+        self.assertFalse(result["deletedJobIds"])
+        self.assertFalse(queue.job_path(job["id"]).parent.exists())
+        self.assertEqual([item["id"] for item in queue.dispatch({"action": "list_state"})["jobs"]], [job["id"]])
+        self.assertEqual(queue.dispatch({"action": "list_state"})["deletedJobIds"], [])
+        self.assertEqual(queue.delete_jobs([job["id"]]), {"deletedJobIds": [job["id"]], "failures": []})
+
+    def test_delete_refuses_missing_or_damaged_records_without_removing_logs(self):
+        for content in (None, "{broken"):
+            with self.subTest(content=content):
+                job_id = str(uuid.uuid4())
+                path = queue.job_path(job_id)
+                path.parent.mkdir()
+                if content is not None:
+                    path.write_text(content, encoding="utf-8")
+                log = path.parent / "output.log"
+                log.write_text("keep for diagnosis", encoding="utf-8")
+                result = queue.delete_jobs([job_id])
+                self.assertEqual(result["deletedJobIds"], [])
+                self.assertTrue(result["failures"])
+                self.assertEqual(log.read_text(encoding="utf-8"), "keep for diagnosis")
+                self.assertFalse(queue.deleted_job_path(job_id).exists())
+
+    def test_delete_refuses_linked_job_directory_record_log_and_nested_directory(self):
+        target = self.root / "outside"
+        target.mkdir()
+        external = target / "external.log"
+        external.write_text("external data", encoding="utf-8")
+        for kind in ("directory", "record", "log", "nested"):
+            with self.subTest(kind=kind):
+                job = self.ended_job()
+                directory = queue.job_path(job["id"]).parent
+                if kind == "directory":
+                    shutil.rmtree(directory)
+                    link, destination, is_directory = directory, target, True
+                elif kind == "record":
+                    link, destination, is_directory = directory / "job.json", external, False
+                    link.unlink()
+                elif kind == "log":
+                    link, destination, is_directory = directory / "output.log", external, False
+                else:
+                    link, destination, is_directory = directory / "nested", target, True
+                try:
+                    link.symlink_to(destination, target_is_directory=is_directory)
+                except OSError as error:
+                    self.skipTest("This host cannot create test symlinks: " + str(error))
+                result = queue.delete_jobs([job["id"]])
+                self.assertEqual(result["deletedJobIds"], [])
+                self.assertIn("符号链接", result["failures"][0]["message"])
+                self.assertTrue(link.is_symlink())
+                self.assertFalse(queue.deleted_job_path(job["id"]).exists())
+                self.assertEqual(external.read_text(encoding="utf-8"), "external data")
+                link.unlink()
+                if kind == "record":
+                    queue.save_job(job)
 
 
 if __name__ == "__main__":
