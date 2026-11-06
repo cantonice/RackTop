@@ -32,6 +32,19 @@
 .training-empty h3, .training-empty strong { margin: 0; font-size: calc(16px + var(--font-adjust, 0px)); font-weight: 600; }
 .training-empty p { width: min(100%, 430px); margin: 0 0 6px; color: var(--text-secondary); font-size: calc(12px + var(--font-adjust, 0px)); line-height: 1.7; }
 .training-job-list { display: grid; gap: 10px; }
+.training-project-groups { display: grid; gap: 18px; }
+.training-project-group { min-width: 0; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in srgb, var(--surface) 38%, transparent); overflow: hidden; }
+.training-project-group__heading { margin: 0; }
+.training-project-group__heading button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 45px; padding: 12px 14px; border: 0; color: var(--text); background: var(--surface-subtle); text-align: left; cursor: pointer; font-size: calc(12px + var(--font-adjust, 0px)); }
+.training-project-group__heading button > svg { flex: none; color: var(--text-tertiary); }
+.training-project-group__heading button > svg.is-expanded { transform: rotate(90deg); }
+.training-project-group__heading button > i { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--project-accent); }
+.training-project-group__name { min-width: 0; overflow: hidden; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.training-project-group__count { flex: none; min-width: 22px; padding: 2px 6px; border-radius: 5px; color: var(--text-secondary); background: var(--surface-solid); font-size: calc(10px + var(--font-adjust, 0px)); text-align: center; font-variant-numeric: tabular-nums; }
+.training-project-group__action { margin-left: auto; color: var(--text-tertiary); font-size: calc(10px + var(--font-adjust, 0px)); font-weight: 400; }
+.training-project-group__heading button:focus-visible { outline-offset: -3px; }
+.training-project-group__content { padding: 12px; }
+.training-project-group__content[hidden] { display: none; }
 .training-job { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: start; gap: 13px; padding: 18px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); }
 .training-job__status { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; color: var(--text-tertiary); background: var(--surface-subtle); }
 .training-job__status.is-running { color: var(--blue); background: color-mix(in srgb, var(--blue) 9%, transparent); }
@@ -39,7 +52,7 @@
 .training-job__status.is-completed { color: var(--green); background: color-mix(in srgb, var(--green) 9%, transparent); }
 .training-job__content { min-width: 0; }
 .training-job__content header { justify-content: flex-start; gap: 10px; }
-.training-job h3 { overflow: hidden; margin: 1px 0; font-size: calc(13px + var(--font-adjust, 0px)); font-weight: 650; text-overflow: ellipsis; }
+.training-job h4 { overflow: hidden; margin: 1px 0; font-size: calc(13px + var(--font-adjust, 0px)); font-weight: 650; text-overflow: ellipsis; }
 .training-status { flex: none; padding: 3px 6px; border-radius: 5px; color: var(--text-secondary); background: var(--surface-subtle); font-size: calc(9px + var(--font-adjust, 0px)); white-space: nowrap; }
 .training-status.is-running { color: var(--blue); background: color-mix(in srgb, var(--blue) 9%, transparent); }
 .training-status:is(.is-queued, .is-stabilizing) { color: var(--orange); background: color-mix(in srgb, var(--orange) 9%, transparent); }
@@ -58,7 +71,7 @@
 .training-profile { min-width: 0; padding: 17px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); }
 .training-profile__heading { display: flex; align-items: center; gap: 10px; }
 .training-profile__heading > span { display: grid; place-items: center; width: 35px; height: 35px; flex: none; border-radius: 9px; color: var(--blue); background: color-mix(in srgb, var(--blue) 8%, transparent); }
-.training-profile__heading h3 { flex: 1; overflow: hidden; margin: 0; font-size: calc(13px + var(--font-adjust, 0px)); text-overflow: ellipsis; white-space: nowrap; }
+.training-profile__heading h4 { flex: 1; overflow: hidden; margin: 0; font-size: calc(13px + var(--font-adjust, 0px)); text-overflow: ellipsis; white-space: nowrap; }
 .training-profile > p { display: flex; align-items: center; gap: 5px; margin: 13px 0 14px; color: var(--text-tertiary); font-size: calc(10px + var(--font-adjust, 0px)); }
 .training-profile dl { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: 10px; margin: 0; font-size: calc(10px + var(--font-adjust, 0px)); }
 .training-profile dt { color: var(--text-tertiary); }

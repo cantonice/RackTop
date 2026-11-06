@@ -51,6 +51,110 @@ afterEach(() => {
 })
 
 describe('TrainingView submission and queue confirmation', () => {
+  it('merges same-name project configurations and independently collapses each project while preserving filtering and editing', async () => {
+    const profiles = [
+      { ...profile, id: 'a1', name: 'A baseline', projectName: 'Project A', projectColor: '#ef4444' },
+      { ...profile, id: 'a2', name: 'A experiment', projectName: ' Project A ', projectColor: '#ef4444' },
+      { ...profile, id: 'b', name: 'B baseline', projectName: 'Project B', projectColor: '#10b981' },
+      { ...profile, id: 'legacy', name: 'Legacy profile' },
+    ]
+    vi.mocked(trainingApi.listProfiles).mockResolvedValue(profiles)
+    await render()
+    await act(async () => button('训练配置 4').click())
+    expect(container.querySelectorAll('.training-project-group')).toHaveLength(3)
+    const projectA = container.querySelector<HTMLElement>('.training-project-group[data-project="Project A"]')!
+    const projectB = container.querySelector<HTMLElement>('.training-project-group[data-project="Project B"]')!
+    expect(projectA.querySelectorAll('.training-profile')).toHaveLength(2)
+    const toggle = projectA.querySelector<HTMLButtonElement>('[aria-label="收起项目：Project A"]')!
+    expect(toggle.tagName).toBe('BUTTON')
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    const content = document.getElementById(toggle.getAttribute('aria-controls')!)!
+    await act(async () => toggle.click())
+    expect(content.hidden).toBe(true)
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(projectA.querySelector('.training-project-group__count')?.textContent).toBe('2')
+    expect(projectB.querySelector<HTMLElement>('.training-project-group__content')?.hidden).toBe(false)
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="筛选项目：Project B"]')!.click())
+    expect(container.querySelectorAll('.training-project-group')).toHaveLength(1)
+    expect(container.querySelector('.training-profile h4')?.textContent).toBe('B baseline')
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="显示全部项目"]')!.click())
+    const restoredA = container.querySelector<HTMLElement>('.training-project-group[data-project="Project A"]')!
+    expect(restoredA.querySelector<HTMLElement>('.training-project-group__content')?.hidden).toBe(true)
+    await act(async () => restoredA.querySelector<HTMLButtonElement>('[aria-label="展开项目：Project A"]')!.click())
+    await act(async () => restoredA.querySelector<HTMLButtonElement>('[aria-label="编辑 A baseline"]')!.click())
+    expect(container.querySelector<HTMLInputElement>('input[placeholder="例如：ResNet50 · 基线训练"]')?.value).toBe('A baseline')
+  })
+
+  it('groups jobs after status filtering and keeps task and configuration collapse states separate', async () => {
+    const projectA = { ...profile, projectName: 'Project A', projectColor: '#ef4444' }
+    const projectB = { ...profile, id: 'profile-b', projectName: 'Project B', projectColor: '#10b981' }
+    vi.mocked(trainingApi.listProfiles).mockResolvedValue([projectA, projectB])
+    vi.mocked(trainingApi.listJobs).mockResolvedValue([
+      { ...job, id: 'a1', name: 'A queued', profile: projectA },
+      { ...job, id: 'a2', name: 'A running', profile: projectA, status: 'running' },
+      { ...job, id: 'b', name: 'B queued', profile: projectB },
+      { ...job, id: 'done', name: 'A finished', profile: projectA, status: 'completed' },
+    ])
+    await render()
+    expect(container.querySelectorAll('.training-project-group')).toHaveLength(2)
+    const aJobs = container.querySelector<HTMLElement>('.training-project-group[data-project="Project A"]')!
+    expect(aJobs.querySelectorAll('.training-job')).toHaveLength(2)
+    await act(async () => aJobs.querySelector<HTMLButtonElement>('[aria-label="收起项目：Project A"]')!.click())
+    const bJobs = container.querySelector<HTMLElement>('.training-project-group[data-project="Project B"]')!
+    expect(bJobs.querySelector<HTMLElement>('.training-project-group__content')?.hidden).toBe(false)
+    await act(async () => bJobs.querySelector<HTMLButtonElement>('[aria-label="查看 B queued 日志"]')!.click())
+    expect(trainingApi.readLog).toHaveBeenCalledWith(server.id, 'b')
+    await act(async () => button('完成').click())
+    await act(async () => button('训练配置 2').click())
+    const aProfiles = container.querySelector<HTMLElement>('.training-project-group[data-project="Project A"]')!
+    expect(aProfiles.querySelector<HTMLElement>('.training-project-group__content')?.hidden).toBe(false)
+    await act(async () => aProfiles.querySelector<HTMLButtonElement>('[aria-label="收起项目：Project A"]')!.click())
+    await act(async () => button('训练任务 3').click())
+    expect(container.querySelector<HTMLElement>('.training-project-group[data-project="Project A"] .training-project-group__content')?.hidden).toBe(true)
+    await act(async () => button('最近结束').click())
+    expect(container.querySelectorAll('.training-project-group')).toHaveLength(1)
+    expect(container.querySelectorAll('.training-job')).toHaveLength(1)
+    expect(container.querySelector('.training-job h4')?.textContent).toBe('A finished')
+  })
+
+  it('retains selected history members when their project is collapsed and includes them in cleanup', async () => {
+    const aProfile = { ...profile, projectName: 'Project A' }
+    const bProfile = { ...profile, projectName: 'Project B' }
+    const ended = [{ ...job, id: 'a1', name: 'A done', profile: aProfile, status: 'completed' as const }, { ...job, id: 'a2', name: 'A failed', profile: aProfile, status: 'failed' as const }, { ...job, id: 'b', name: 'B done', profile: bProfile, status: 'completed' as const }]
+    vi.mocked(trainingApi.listJobs).mockResolvedValue(ended)
+    await render()
+    await act(async () => button('最近结束').click())
+    await act(async () => container.querySelector<HTMLInputElement>('[aria-label="选择删除 A done（Training server）"]')!.click())
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="收起项目：Project A"]')!.click())
+    expect(container.querySelector('.training-history-selection')?.textContent).toContain('已选 1 项')
+    expect(container.querySelector<HTMLInputElement>('[aria-label="选择删除 A done（Training server）"]')?.checked).toBe(true)
+    expect(container.querySelector('.training-project-group[data-project="Project A"] .training-project-group__count')?.textContent).toBe('2')
+    await act(async () => container.querySelector<HTMLInputElement>('[aria-label="全选已结束任务"]')!.click())
+    expect(container.querySelector('.training-history-selection')?.textContent).toContain('已选 3 项')
+    await act(async () => button('删除所选记录及日志').click())
+    expect(container.querySelector('[role="alertdialog"]')?.textContent).toContain('3 项已结束任务')
+  })
+
+  it('reveals the completed notification target once when it arrives without reopening other collapsed projects', async () => {
+    const aProfile = { ...profile, projectName: 'Project A' }
+    const bProfile = { ...profile, projectName: 'Project B' }
+    const ended = [{ ...job, id: 'old', name: 'Old A', profile: aProfile, status: 'completed' as const }, { ...job, id: 'b', name: 'B done', profile: bProfile, status: 'completed' as const }]
+    vi.mocked(trainingApi.listJobs).mockResolvedValue(ended)
+    await render()
+    await act(async () => button('最近结束').click())
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="收起项目：Project A"]')!.click())
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="收起项目：Project B"]')!.click())
+    await act(async () => root.render(<TrainingView servers={[server]} snapshots={{}} onNotice={vi.fn()} completionJobId="new-result" />))
+    expect(container.querySelector<HTMLElement>('.training-project-group[data-project="Project A"] .training-project-group__content')?.hidden).toBe(true)
+    vi.mocked(trainingApi.listJobs).mockResolvedValue([...ended, { ...ended[0], id: 'new-result', name: 'New A result' }])
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="刷新训练任务"]')!.click())
+    expect(container.querySelector<HTMLElement>('.training-project-group[data-project="Project A"] .training-project-group__content')?.hidden).toBe(false)
+    expect(container.querySelector<HTMLElement>('.training-project-group[data-project="Project B"] .training-project-group__content')?.hidden).toBe(true)
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="收起项目：Project A"]')!.click())
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="刷新训练任务"]')!.click())
+    expect(container.querySelector<HTMLElement>('.training-project-group[data-project="Project A"] .training-project-group__content')?.hidden).toBe(true)
+  })
+
   it('indexes independent projects, filters profiles and synchronizes their accent color after saving', async () => {
     const profiles = [
       { ...profile, id: 'a', name: 'A baseline', projectName: 'Project A', projectColor: '#ef4444' },
