@@ -83,9 +83,13 @@ GPU 选择界面和远端队列使用同一显存规则：每卡空闲显存达�
 
 训练日志开头记录实际解析的工作目录、最终命令和 GPU UUID。工作目录决定相对文件路径的基准；填写绝对脚本路径不会自动切换到脚本目录。建议项目脚本使用项目根目录，并区分启动工作目录与训练配置中的输出目录（例如 `work_dir`）。修改路径或环境后，应重新检查。
 
-如果日志出现 `ImportError: libopencv_gapi.so.405: cannot open shared object file` 等原生库错误，应检查当前训练环境中的扩展依赖及动态库搜索路径。路径检查通过只说明目录、文件及可执行程序可用，不保证训练脚本的所有依赖可以成功导入。
+训练连接通过无 PTY 的交互式登录 Bash 加载用户已有的 Shell 启动环境，再执行队列请求。datalist 和后台训练继承该环境中的动态库搜索路径；启动前缀仍决定实际使用哪个 Python、Conda 或 torchrun，平台不会将训练参数作为 Shell 脚本执行。Bash 启动文件的加载规则见 [Bash 官方说明](https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html)。
 
-远端需要 Linux、Python 3.8 或更高版本、可用的 NVIDIA 驱动与 `nvidia-smi`，以及训练脚本所需的环境和依赖。首版训练队列支持 NVIDIA 物理 GPU，不支持 MIG 分区、跨服务器分布式训练或 Ascend/NPU 训练调度；原有监控功能保持可用。
+如果终端里同一 Python 能导入模块，平台却报告 `ImportError: libopencv_gapi.so.405: cannot open shared object file` 等错误，应先对照 Shell 环境及 `LD_LIBRARY_PATH`，不能仅凭报错判断需要重装包。仅在某个终端手工 `export` 的变量不会自动出现在新的 SSH 会话中；需要的环境应由服务器用户已有的启动文件或明确的 Conda 启动前缀建立。路径检查通过只说明目录、文件及可执行程序可用，不保证训练脚本的所有依赖可以成功导入。
+
+新提交或明确“恢复队列”时，平台会核对守护进程的程序版本及训练相关环境指纹，必要时只替换调度器，使其使用当前环境；已经运行的 datalist 和训练进程保留。查询列表和检查路径不会自动恢复或重跑任务。已经失败的任务需要确认后重新提交，避免重复生成数据或训练。
+
+远端需要 Linux、Bash、Python 3.8 或更高版本、可用的 NVIDIA 驱动与 `nvidia-smi`，以及训练脚本所需的环境和依赖。首版训练队列支持 NVIDIA 物理 GPU，不支持 MIG 分区、跨服务器分布式训练或 Ascend/NPU 训练调度；原有监控功能保持可用。
 
 队列状态和日志保存在 SSH 用户的私有 `~/.racktop/modelgym-training/` 子目录内，并按执行主机隔离。通常不需要 root 权限。凭据仍由原有 SSH/系统安全凭据机制管理，不写入训练配置。
 

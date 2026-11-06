@@ -17,6 +17,10 @@ use tauri::State;
 use tokio::{io::AsyncWriteExt, time::timeout};
 
 const WORKER: &str = include_str!("../assets/modelgym-training.py");
+// Startup files get EOF, while the SSH script is retained on FD 3 and restored
+// only after the user's interactive login environment has been initialized.
+pub(crate) const TRAINING_REMOTE_COMMAND: &str =
+    r#"sh -c 'exec bash -lic "$1" 3<&0 </dev/null' modelgym 'exec sh -s <&3 3<&-'"#;
 
 fn default_interpreter() -> String {
     "python -u".into()
@@ -463,7 +467,9 @@ fn remote_script(request: &Value) -> Result<String, String> {
         STANDARD.encode(serde_json::to_vec(request).map_err(|error| error.to_string())?);
     Ok(format!(
         r#"set -eu
+printf '\n'
 umask 077
+export MODELGYM_ENVIRONMENT_SOURCE=interactive-login-bash
 command -v python3 >/dev/null 2>&1 || {{ printf '%s\n' '{{"error":"远端缺少 python3；ModelGym 训练队列需要 Python 3.8 或更新版本"}}'; exit 41; }}
 state="$HOME/.racktop/modelgym-training"
 if [ -L "$state" ]; then printf '%s\n' '{{"error":"远端训练队列目录不能是符号链接"}}'; exit 42; fi
@@ -490,6 +496,16 @@ async fn remote<T: DeserializeOwned>(
     remote_with_timeout(server, password, request, Duration::from_secs(60)).await
 }
 
+fn configure_training_transport(command: &mut tokio::process::Command, target: &str) {
+    command
+        .arg("-T")
+        .arg(target)
+        .arg(TRAINING_REMOTE_COMMAND)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+}
+
 async fn remote_with_timeout<T: DeserializeOwned>(
     server: &Server,
     password: Option<&str>,
@@ -501,12 +517,7 @@ async fn remote_with_timeout<T: DeserializeOwned>(
     command.kill_on_drop(true);
     // Pipe the bundled script through stdin: a Windows process command line must
     // not carry the worker's base64 payload (the Windows limit is ~32 KiB).
-    command
-        .arg(target)
-        .arg("sh -s")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    configure_training_transport(&mut command, &target);
     let operation = async {
         let mut child = command
             .spawn()
@@ -992,6 +1003,15 @@ mod tests {
     }
 
     #[test]
+    fn training_transport_loads_login_environment_without_a_pty_or_user_command_interpolation() {
+        let mut command = tokio::process::Command::new("ssh");
+        configure_training_transport(&mut command, "user@server");
+        let arguments: Vec<_> = command.as_std().get_args().map(|value| value.to_str().unwrap()).collect();
+        assert_eq!(arguments, ["-T", "user@server", TRAINING_REMOTE_COMMAND]);
+        assert_eq!(TRAINING_REMOTE_COMMAND, r#"sh -c 'exec bash -lic "$1" 3<&0 </dev/null' modelgym 'exec sh -s <&3 3<&-'"#);
+    }
+
+    #[test]
     fn ssh_payload_uses_stdin_and_preserves_non_ascii_and_shell_metacharacters_as_data() {
         let request =
             json!({"action":"check_paths","profile":{"scriptPath":"路径/it's $(touch bad).py"}});
@@ -1001,5 +1021,7 @@ mod tests {
         assert!(!script.contains("$(touch bad)"));
         assert!(script.contains("umask 077"));
         assert!(script.contains("worker.sha256"));
+        assert!(script.starts_with("set -eu\nprintf '\\n'\n"));
+        assert!(script.contains("export MODELGYM_ENVIRONMENT_SOURCE=interactive-login-bash"));
     }
 }

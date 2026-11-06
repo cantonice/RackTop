@@ -311,6 +311,74 @@ else:
         kill.assert_called_once_with(14001, signal.SIGTERM)
         popen.assert_not_called()
 
+    def test_same_worker_refreshes_stale_library_environment_without_stopping_a_training_runner(self):
+        job_id = str(uuid.uuid4())
+        queue.submit(job_id, self.profile(), True)
+        self.fake_launch(queue.load_job(job_id), queue.probe_gpus()[0], self.clock)
+        running = queue.load_job(job_id)
+        previous = {"pid": 14001, "startTicks": "10", "bootId": "test-boot"}
+        replacement = {"pid": 14002, "startTicks": "11", "bootId": "test-boot"}
+        queue.atomic_json(queue.STATE_DIR / "daemon.json", previous)
+        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": "old-library-directory"}):
+            queue.atomic_json(queue.STATE_DIR / "daemon-version.json", queue.daemon_version())
+        alive = {14001: True, 14002: True, running["pid"]: True}
+        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": "updated-library-directory"}), mock.patch.object(queue, "identity_alive", side_effect=lambda record: bool(record and alive.get(record["pid"]))), mock.patch.object(queue.os, "kill", side_effect=lambda pid, _signal: alive.update({pid: False})) as kill, mock.patch.object(queue.os, "killpg", create=True) as killpg, mock.patch.object(queue.subprocess, "Popen", return_value=mock.Mock(pid=14002)) as popen, mock.patch.object(queue, "identity", return_value=replacement):
+            with queue.lock():
+                REAL_ENSURE_DAEMON()
+                REAL_ENSURE_DAEMON()
+            self.assertEqual(popen.call_args.kwargs["env"]["LD_LIBRARY_PATH"], "updated-library-directory")
+            version = json.loads((queue.STATE_DIR / "daemon-version.json").read_text())
+            self.assertEqual(version, queue.daemon_version())
+        kill.assert_called_once_with(14001, signal.SIGTERM)
+        killpg.assert_not_called()
+        popen.assert_called_once()
+        self.assertEqual(queue.load_job(job_id)["pid"], running["pid"])
+        self.assertEqual(queue.load_job(job_id)["status"], "running")
+        self.assertNotIn("updated-library-directory", json.dumps(version))
+
+    def test_environment_version_ignores_connection_details_and_never_persists_environment_values(self):
+        previous = {"pid": 14001, "startTicks": "10", "bootId": "test-boot"}
+        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": "private-library-directory", "UNRELATED_TEST_SECRET": "private-token"}):
+            version = queue.daemon_version()
+            queue.atomic_json(queue.STATE_DIR / "daemon.json", previous)
+            queue.atomic_json(queue.STATE_DIR / "daemon-version.json", version)
+            with mock.patch.dict(os.environ, {"SSH_CONNECTION": "new-session", "UNRELATED_TEST_SECRET": "changed-token"}), mock.patch.object(queue, "identity_alive", return_value=True), mock.patch.object(queue.os, "kill") as kill, mock.patch.object(queue.subprocess, "Popen") as popen:
+                with queue.lock():
+                    REAL_ENSURE_DAEMON()
+                self.assertEqual(queue.daemon_version(), version)
+                kill.assert_not_called()
+                popen.assert_not_called()
+            with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": "changed-library-directory"}):
+                self.assertNotEqual(queue.daemon_version(), version)
+        metadata = (queue.STATE_DIR / "daemon-version.json").read_text()
+        self.assertNotIn("private-library-directory", metadata)
+        self.assertNotIn("private-token", metadata)
+
+    def test_datalist_and_training_inherit_login_environment_with_only_a_digest_in_worker_logs(self):
+        script = "import json, os\nfrom pathlib import Path\nPath(%r).write_text(json.dumps({key:os.environ.get(key) for key in ['LD_LIBRARY_PATH','PYTHONPATH','CONDA_PREFIX','MODELGYM_ENVIRONMENT_SOURCE','CUDA_VISIBLE_DEVICES']}))\n"
+        profile, job_id = self.datalist_profile(script % "datalist-environment.json"), str(uuid.uuid4())
+        self.script.write_text(script % "training-environment.json", encoding="utf-8")
+        environment = {"LD_LIBRARY_PATH": "private-runtime-library-directory", "PYTHONPATH": "private-python-import-directory", "CONDA_PREFIX": "private-conda-prefix", "MODELGYM_ENVIRONMENT_SOURCE": "interactive-login-bash"}
+        with mock.patch.dict(os.environ, environment):
+            queue.submit(job_id, profile, True)
+            preparation_log = self.finish_datalist(job_id)
+            job = queue.load_job(job_id)
+            job.update({"status": "running", "pid": os.getpid(), "gpuIndices": [0], "processIdentity": {"pid": os.getpid(), "startTicks": "10", "bootId": "test-boot"}})
+            queue.save_job(job)
+            training_log = io.StringIO()
+            with contextlib.redirect_stdout(training_log):
+                queue.run_job(job_id)
+        for filename, cuda in (("datalist-environment.json", ""), ("training-environment.json", "GPU-a")):
+            received = json.loads((self.workdir / filename).read_text())
+            for key, value in environment.items():
+                self.assertEqual(received[key], value)
+            self.assertEqual(received["CUDA_VISIBLE_DEVICES"], cuda)
+        for log in (preparation_log, training_log.getvalue()):
+            self.assertIn("SSH 交互式登录 Bash", log)
+            self.assertIn("运行环境指纹", log)
+            for value in environment.values():
+                self.assertNotIn(value, log)
+
     def tick_for(self, seconds):
         for _ in range(seconds // 2):
             self.clock += 2

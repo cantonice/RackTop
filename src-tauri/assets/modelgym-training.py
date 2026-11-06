@@ -62,6 +62,10 @@ KILL_SIGNAL = getattr(signal, "SIGKILL", 9)
 ACTIVE = {"queued", "stabilizing", "running"}
 TERMINAL = {"completed", "failed", "cancelled"}
 SHELL_OPERATORS = {";", "&&", "||", "|", "&", ">", ">>", "<", "2>", "2>&1"}
+RUNTIME_ENVIRONMENT_KEYS = (
+    "PATH", "LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONPATH", "PYTHONHOME",
+    "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "VIRTUAL_ENV", "CUDA_HOME", "CUDA_PATH",
+)
 
 
 def now():
@@ -553,6 +557,17 @@ def spec_hash(profile):
     return hashlib.sha256(json.dumps(specification, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def runtime_environment_sha256():
+    # Store/print only a digest of standard executable/import/library settings.
+    # Do not persist arbitrary environment variables or credential values.
+    values = {key: os.environ.get(key) for key in RUNTIME_ENVIRONMENT_KEYS}
+    return hashlib.sha256(json.dumps(values, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+
+
+def daemon_version():
+    return {"workerSha256": WORKER_VERSION, "runtimeEnvironmentSha256": runtime_environment_sha256()}
+
+
 def ensure_daemon():
     record_path = STATE_DIR / "daemon.json"
     version_path = STATE_DIR / "daemon-version.json"
@@ -560,12 +575,16 @@ def ensure_daemon():
         previous = json.loads(record_path.read_text())
         if identity_alive(previous):
             try:
-                if json.loads(version_path.read_text()).get("workerSha256") == WORKER_VERSION:
+                previous_version = json.loads(version_path.read_text())
+                expected = daemon_version()
+                if all(previous_version.get(key) == value for key, value in expected.items()):
                     return
             except (FileNotFoundError, ValueError, AttributeError):
                 pass
             # Runners have independent sessions. Replace only the verified daemon
-            # PID so its old in-memory scheduler cannot skip the new prerequisite.
+            # PID so neither stale code nor stale library/import environment is
+            # inherited by future runners. Existing training/preparation sessions
+            # are independent and must not receive this daemon-only signal.
             try:
                 os.kill(previous["pid"], signal.SIGTERM)
             except ProcessLookupError:
@@ -578,12 +597,12 @@ def ensure_daemon():
     except (FileNotFoundError, ValueError, KeyError):
         pass
     with open(STATE_DIR / "daemon.log", "ab", buffering=0) as log:
-        process = subprocess.Popen([sys.executable, str(SCRIPT), "daemon", HOST_NAMESPACE], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
+        process = subprocess.Popen([sys.executable, str(SCRIPT), "daemon", HOST_NAMESPACE], stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=os.environ.copy(), start_new_session=True, close_fds=True)
     record = identity(process.pid)
     if not record:
         raise RuntimeError("远端队列守护进程启动失败；请检查 " + str(STATE_DIR / "daemon.log"))
     atomic_json(record_path, record)
-    atomic_json(version_path, {"workerSha256": WORKER_VERSION})
+    atomic_json(version_path, daemon_version())
 
 
 def submit(job_id, profile, allow_queue):
@@ -764,6 +783,8 @@ def run_job(job_id, datalist=False):
         # Absolute script paths do not change the configured working directory.
         print("[ModelGym] 工作目录：" + working_directory, flush=True)
         print("[ModelGym] 启动命令：" + command_preview(arguments), flush=True)
+        environment_source = "SSH 交互式登录 Bash" if environment.get("MODELGYM_ENVIRONMENT_SOURCE") == "interactive-login-bash" else "继承当前进程环境"
+        print("[ModelGym] 环境来源：%s；运行环境指纹：%s" % (environment_source, runtime_environment_sha256()[:12]), flush=True)
         print("[ModelGym] CUDA_VISIBLE_DEVICES=" + environment["CUDA_VISIBLE_DEVICES"], flush=True)
         # Hold the cancellation lock through actual process creation.
         try:
@@ -961,7 +982,7 @@ def daemon():
         with lock("daemon.lock", blocking=False):
             with lock():
                 atomic_json(STATE_DIR / "daemon.json", identity(os.getpid()))
-                atomic_json(STATE_DIR / "daemon-version.json", {"workerSha256": WORKER_VERSION})
+                atomic_json(STATE_DIR / "daemon-version.json", daemon_version())
             while True:
                 try:
                     tick()
