@@ -74,10 +74,12 @@ pub struct TrainingGpu {
     pub uuid: String,
     pub index: u32,
     pub name: String,
-    pub utilization: f64,
+    #[serde(default)]
+    pub utilization: Option<f64>,
     pub memory_total_mb: f64,
     pub memory_used_mb: f64,
-    pub compute_process_count: u32,
+    #[serde(default)]
+    pub compute_process_count: Option<u32>,
     pub eligible: bool,
     pub reasons: Vec<String>,
 }
@@ -973,6 +975,22 @@ mod tests {
         }
         assert!(validate_profile(&profile(), true).is_ok());
     }
+    #[test]
+    fn optional_gpu_diagnostics_can_be_unknown_without_losing_memory_eligibility() {
+        let mut payload = json!({"uuid":"GPU-a","index":0,"name":"GPU","utilization":null,"memoryTotalMb":24576,"memoryUsedMb":4096,"computeProcessCount":null,"eligible":true,"reasons":[]});
+        let gpu: TrainingGpu = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(gpu.utilization, None);
+        assert_eq!(gpu.compute_process_count, None);
+        assert!(gpu.eligible);
+        assert_eq!(gpu.memory_total_mb - gpu.memory_used_mb, 20480.0);
+        payload["utilization"] = json!(100);
+        payload["computeProcessCount"] = json!(4);
+        let observed: TrainingGpu = serde_json::from_value(payload).unwrap();
+        assert_eq!(observed.utilization, Some(100.0));
+        assert_eq!(observed.compute_process_count, Some(4));
+        assert!(observed.eligible);
+    }
+
     #[test]
     fn ssh_payload_uses_stdin_and_preserves_non_ascii_and_shell_metacharacters_as_data() {
         let request =

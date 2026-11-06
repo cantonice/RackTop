@@ -172,27 +172,28 @@ describe('training command and resource boundary', () => {
     expect(validateTrainingProfile({ ...profile, gpuUuids: [] }, false)).toBeNull()
   })
 
-  it('uses strictly more free memory than the configured threshold regardless of GPU load', () => {
+  it('accepts free memory equal to the threshold regardless of GPU load or process sampling', () => {
     const gpu = { uuid: 'GPU-0', index: 0, name: 'RTX', utilization: 10, memoryUtilization: 0, memoryUsedMb: 0, memoryTotalMb: 24 * 1024, temperatureCelsius: 30, powerWatts: 20 }
     const snapshot = { gpus: [gpu, { ...gpu, uuid: 'GPU-1', index: 1, utilization: 11 }, { ...gpu, uuid: 'GPU-2', index: 2, memoryUsedMb: 20 * 1024 }], processes: [{ gpuUuid: 'GPU-1', isCurrentUser: true }], processesSampled: true } as Snapshot
     const candidates = trainingGpuFromSnapshot(snapshot, 8)
     expect(candidates).toHaveLength(3)
     expect(candidates[0].eligible).toBe(true)
     expect(candidates[1]).toMatchObject({ eligible: true, computeProcessCount: 1 })
-    expect(candidates[2].reasons.join(' ')).toContain('空闲显存须大于')
+    expect(candidates[2].reasons.join(' ')).toContain('空闲显存不足')
     expect(trainingGpuFromSnapshot({ ...snapshot, processesSampled: false }, 8)[0].eligible).toBe(true)
-    expect(trainingGpuFromSnapshot({ ...snapshot, gpus: [{ ...gpu, utilization: 99, memoryUsedMb: 14 * 1024 }] }, 10)[0].eligible).toBe(false)
-    expect(trainingGpuFromSnapshot({ ...snapshot, gpus: [{ ...gpu, utilization: 99, memoryUsedMb: 14 * 1024 - 1 }] }, 10)[0].eligible).toBe(true)
+    expect(trainingGpuFromSnapshot({ ...snapshot, gpus: [{ ...gpu, utilization: 99, memoryUsedMb: 14 * 1024 }] }, 10)[0].eligible).toBe(true)
+    expect(trainingGpuFromSnapshot({ ...snapshot, gpus: [{ ...gpu, utilization: 99, memoryUsedMb: 14 * 1024 + 1 }] }, 10)[0].eligible).toBe(false)
+    expect(trainingGpuFromSnapshot({ ...snapshot, gpus: [{ ...gpu, utilization: Number.NaN }] }, 10)[0].eligible).toBe(true)
     expect(trainingGpuFromSnapshot({ ...snapshot, gpus: [{ ...gpu, memoryUsedMb: Number.NaN }] }, 10)[0].eligible).toBe(false)
   })
 
-  it('still requires queue confirmation for compute load even when the display shows enough memory', async () => {
+  it('does not request queue confirmation for compute load when enough memory remains', async () => {
     const check = vi.spyOn(trainingApi, 'checkPaths').mockResolvedValue({ ok: true, workingDirectoryExists: true, scriptExists: true, configExists: true, pythonAvailable: true, nvidiaSmiAvailable: true, gpus: [{ uuid: 'GPU-0', index: 0, name: 'GPU', utilization: 99, memoryUsedMb: 0, memoryTotalMb: 24 * 1024, computeProcessCount: 1, eligible: true, reasons: [] }], commandPreview: '', message: 'demo' })
     try {
       const result = await trainingApi.submit('memory-display-qa', profile, false)
-      expect(result.requiresQueueConfirmation).toBe(true)
-      expect(result.reasons.join(' ')).toContain('计算进程')
-      expect(result.job).toBeNull()
+      expect(result.requiresQueueConfirmation).toBe(false)
+      expect(result.reasons).toEqual([])
+      expect(result.job?.status).toBe('stabilizing')
     } finally { check.mockRestore() }
   })
 })

@@ -23,10 +23,10 @@ export interface TrainingGpu {
   uuid: string
   index: number
   name: string
-  utilization: number
+  utilization: number | null
   memoryTotalMb: number
   memoryUsedMb: number
-  computeProcessCount: number
+  computeProcessCount: number | null
   eligible: boolean
   reasons: string[]
 }

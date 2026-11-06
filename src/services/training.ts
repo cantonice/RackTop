@@ -132,16 +132,14 @@ export function trainingGpuFromSnapshot(snapshot: Snapshot, minimumFreeMemoryGb:
     const computeProcessCount = snapshot.processes.filter((process) => process.gpuUuid === gpu.uuid).length
     const reasons: string[] = []
     if (gpu.uuid.startsWith('unavailable-') || !Number.isFinite(gpu.memoryTotalMb) || gpu.memoryTotalMb <= 0 || !Number.isFinite(gpu.memoryUsedMb) || gpu.memoryUsedMb < 0 || gpu.memoryUsedMb > gpu.memoryTotalMb) reasons.push('GPU 显存指标不可读')
-    if ((gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024 <= minimumFreeMemoryGb) reasons.push(`空闲显存须大于 ${minimumFreeMemoryGb} GB`)
+    if ((gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024 < minimumFreeMemoryGb) reasons.push(`空闲显存不足 ${minimumFreeMemoryGb} GB`)
     return { ...gpu, computeProcessCount, eligible: reasons.length === 0, reasons }
   })
 }
 
 function trainingQueueReasons(gpu: TrainingGpu, minimum: number): string[] {
   const reasons: string[] = []
-  if (gpu.uuid.startsWith('unavailable-') || !Number.isFinite(gpu.memoryTotalMb) || gpu.memoryTotalMb <= 0 || !Number.isFinite(gpu.memoryUsedMb) || !Number.isFinite(gpu.utilization)) reasons.push('GPU 指标不可读')
-  if (gpu.computeProcessCount > 0) reasons.push('存在计算进程')
-  if (gpu.utilization > 10) reasons.push('利用率超过 10%')
+  if (gpu.uuid.startsWith('unavailable-') || !Number.isFinite(gpu.memoryTotalMb) || gpu.memoryTotalMb <= 0 || !Number.isFinite(gpu.memoryUsedMb) || gpu.memoryUsedMb < 0 || gpu.memoryUsedMb > gpu.memoryTotalMb) reasons.push('GPU 显存指标不可读')
   if ((gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024 < minimum) reasons.push(`空闲显存不足 ${minimum} GB`)
   return reasons
 }

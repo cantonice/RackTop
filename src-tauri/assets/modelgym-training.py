@@ -236,50 +236,68 @@ def command_preview(arguments):
     return " ".join(shlex.quote(argument) for argument in arguments)
 
 
-def probe_gpus(minimum=0):
+def probe_gpus(minimum=0, include_diagnostics=True):
     executable = shutil.which("nvidia-smi")
     if not executable:
         return [], "远端缺少 nvidia-smi；请先安装 NVIDIA 驱动"
     try:
         def query(fields):
             return subprocess.run([executable, fields, "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=5, check=True).stdout
-        metrics = query("--query-gpu=uuid,index,name,utilization.gpu,memory.total,memory.used")
-        applications = query("--query-compute-apps=gpu_uuid,pid")
+        # Device identity and memory are required for scheduling. Optional
+        # utilization/process telemetry must never make usable memory disappear.
+        metrics = query("--query-gpu=uuid,index,name,memory.total,memory.used")
         devices = []
         for row in csv.reader(io.StringIO(metrics)):
             if not row:
                 continue
-            if len(row) != 6:
+            if len(row) != 5:
                 raise ValueError("GPU 指标列数不完整")
             values = [item.strip() for item in row]
-            utilization, total, used = map(float, values[3:])
-            if not all(math.isfinite(item) for item in (utilization, total, used)) or total <= 0 or used < 0 or not 0 <= utilization <= 100:
-                raise ValueError("GPU 指标不可读")
+            total, used = map(float, values[3:])
+            if not all(math.isfinite(item) for item in (total, used)) or total <= 0 or not 0 <= used <= total:
+                raise ValueError("GPU 显存指标不可读")
             index = int(values[1])
             if index < 0 or not re.fullmatch(r"GPU-[A-Za-z0-9_-]+", values[0]):
                 raise ValueError("GPU 身份或卡号不可确认")
-            devices.append({"uuid": values[0], "index": index, "name": values[2], "utilization": utilization, "memoryTotalMb": total, "memoryUsedMb": used, "computeProcessCount": 0})
+            devices.append({"uuid": values[0], "index": index, "name": values[2], "utilization": None, "memoryTotalMb": total, "memoryUsedMb": used, "computeProcessCount": None})
         if not devices or len({gpu["uuid"] for gpu in devices}) != len(devices) or len({gpu["index"] for gpu in devices}) != len(devices):
             raise ValueError("未取得完整的 NVIDIA GPU 清单")
         by_uuid = {gpu["uuid"]: gpu for gpu in devices}
-        for row in csv.reader(io.StringIO(applications)):
-            if not row or not any(value.strip() for value in row):
-                continue
-            if len(row) != 2 or row[0].strip() not in by_uuid or not row[1].strip().isdigit():
-                raise ValueError("计算进程清单不可确认（包含不可映射的设备或 MIG 分区）")
-            by_uuid[row[0].strip()]["computeProcessCount"] += 1
+        if include_diagnostics:
+            try:
+                utilization = query("--query-gpu=uuid,utilization.gpu")
+                for row in csv.reader(io.StringIO(utilization)):
+                    if len(row) != 2 or row[0].strip() not in by_uuid:
+                        continue
+                    try:
+                        value = float(row[1].strip())
+                        if math.isfinite(value) and 0 <= value <= 100:
+                            by_uuid[row[0].strip()]["utilization"] = value
+                    except ValueError:
+                        pass
+            except (OSError, ValueError, csv.Error, subprocess.SubprocessError):
+                pass
+            try:
+                applications = query("--query-compute-apps=gpu_uuid,pid")
+                counts = {gpu["uuid"]: 0 for gpu in devices}
+                for row in csv.reader(io.StringIO(applications)):
+                    if not row or not any(value.strip() for value in row):
+                        continue
+                    if len(row) != 2 or row[0].strip() not in by_uuid or not row[1].strip().isdigit():
+                        raise ValueError("计算进程清单不完整")
+                    counts[row[0].strip()] += 1
+                for device, count in counts.items():
+                    by_uuid[device]["computeProcessCount"] = count
+            except (OSError, ValueError, csv.Error, subprocess.SubprocessError):
+                pass
         for gpu in devices:
             gpu["reasons"] = []
-            if gpu["computeProcessCount"]:
-                gpu["reasons"].append("存在 %s 个计算进程" % gpu["computeProcessCount"])
-            if gpu["utilization"] > 10:
-                gpu["reasons"].append("利用率 %.1f%% 超过 10%%" % gpu["utilization"])
             free = (gpu["memoryTotalMb"] - gpu["memoryUsedMb"]) / 1024
             if free < minimum:
                 gpu["reasons"].append("空闲显存 %.2f GB，要求 %.2f GB" % (free, minimum))
             gpu["eligible"] = not gpu["reasons"]
         return devices, None
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
+    except (OSError, ValueError, csv.Error, subprocess.SubprocessError) as error:
         return [], "无法确认 NVIDIA GPU 状态，继续等待：" + str(error)[:300]
 
 
@@ -293,17 +311,13 @@ def readiness(profile, devices, probe_error=None):
         if gpu is None:
             reasons.append("所选 GPU 不可见：" + device)
             continue
-        if gpu["computeProcessCount"]:
-            reasons.append("GPU %s 存在计算进程" % gpu["index"])
-        if gpu["utilization"] > 10:
-            reasons.append("GPU %s 利用率超过 10%%" % gpu["index"])
         free = (gpu["memoryTotalMb"] - gpu["memoryUsedMb"]) / 1024
         if free < profile["minimumFreeMemoryGb"]:
             reasons.append("GPU %s 空闲显存 %.2f GB，要求 %.2f GB" % (gpu["index"], free, profile["minimumFreeMemoryGb"]))
     return reasons
 
 
-def check_paths(profile):
+def check_paths(profile, include_diagnostics=True):
     workdir, script, config = resolved_paths(profile)
     datalist_script = resolved_paths(dict(profile, scriptPath=profile["datalistScriptPath"]))[1] if profile.get("datalistScriptPath") else None
     interpreter = command_argv(profile)[0]
@@ -324,7 +338,7 @@ def check_paths(profile):
     for field, message in (("pythonAvailable", "远端需要 Python 3.8 或更新版本"), ("nvidiaSmiAvailable", "远端缺少 nvidia-smi"), ("workingDirectoryExists", "远端工作目录不存在"), ("scriptExists", "远端训练脚本不存在或不可读"), ("configExists", "远端配置文件不存在或不可读"), ("interpreterAvailable", "远端找不到启动程序；请使用 Python/Conda/torchrun 的绝对路径")):
         if not result[field]:
             issues.append(message)
-    devices, probe_error = probe_gpus(profile["minimumFreeMemoryGb"]) if result["nvidiaSmiAvailable"] else ([], None)
+    devices, probe_error = probe_gpus(profile["minimumFreeMemoryGb"], include_diagnostics=include_diagnostics) if result["nvidiaSmiAvailable"] else ([], None)
     result.update({"gpus": devices, "ok": not issues and not probe_error, "message": "；".join(issues + ([probe_error] if probe_error else [])) or "脚本、配置、启动程序和 NVIDIA 驱动检查通过"})
     return result, issues, probe_error
 
@@ -585,7 +599,7 @@ def submit(job_id, profile, allow_queue):
                 ensure_daemon()
                 start_datalist(existing, now())
             return {"job": public_job(existing), "requiresQueueConfirmation": False, "reasons": []}
-        report, issues, probe_error = check_paths(profile)
+        report, issues, probe_error = check_paths(profile, include_diagnostics=False)
         if issues:
             raise ValueError("；".join(issues))
         reasons = readiness(profile, report["gpus"], probe_error)
@@ -667,7 +681,9 @@ def tick():
         pending = [job for job in pending if job["status"] in ("queued", "stabilizing")]
         if not pending:
             return
-        devices, error = probe_gpus()
+        # Keep optional telemetry (including its timeouts) outside the scheduler
+        # so it cannot reset the continuous-memory stability window.
+        devices, error = probe_gpus(include_diagnostics=False)
         reserved = {device for job in jobs if job["status"] == "running" or identity_alive(job.get("processIdentity")) for device in job["gpuUuids"]}
         for job in pending:
             overlap = set(job["gpuUuids"]) & reserved
@@ -694,7 +710,7 @@ def tick():
                 try:
                     # Fresh GPU checks and process creation happen under the same
                     # queue lock; no other ModelGym submit/cancel can race them.
-                    fresh, fresh_error = probe_gpus()
+                    fresh, fresh_error = probe_gpus(include_diagnostics=False)
                     latest = readiness(job["profile"], fresh, fresh_error)
                     if latest:
                         job.update({"status": "queued", "stableSince": None, "waitingReason": "；".join(latest)})

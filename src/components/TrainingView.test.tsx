@@ -13,7 +13,7 @@ const server: Server = { id: 'server', name: 'Training server', host: '10.0.0.1'
 const gpu = { uuid: 'GPU-0', index: 0, name: 'RTX 4090', utilization: 90, memoryUtilization: 70, memoryUsedMb: 16 * 1024, memoryTotalMb: 24 * 1024, temperatureCelsius: 60, powerWatts: 250 }
 const snapshot = { serverId: server.id, timestamp: Math.floor(Date.now() / 1000), status: 'online', acceleratorVendor: 'nvidia', gpus: [gpu, { ...gpu, uuid: 'GPU-1', index: 1, utilization: 0, memoryUsedMb: 0 }], processes: [{ gpuUuid: 'GPU-0', isCurrentUser: false }], processesSampled: true } as Snapshot
 const profile: TrainingProfile = { id: 'profile', name: 'ResNet baseline', serverId: server.id, workingDirectory: '/workspace/resnet', interpreter: 'python -u', scriptPath: 'train.py', configPath: 'configs/train.yaml', configMode: 'flag', configFlag: '--config', extraArguments: '--epochs 20', gpuUuids: ['GPU-0'], minimumFreeMemoryGb: 8, createdAt: 1, updatedAt: 1 }
-const job: TrainingJob = { id: 'job', profileId: profile.id, profile, name: profile.name, serverId: server.id, gpuUuids: ['GPU-0'], gpuIndices: [0], command: 'python train.py --config configs/train.yaml', status: 'queued', waitingReason: 'GPU 0 存在计算进程', createdAt: 1 }
+const job: TrainingJob = { id: 'job', profileId: profile.id, profile, name: profile.name, serverId: server.id, gpuUuids: ['GPU-0'], gpuIndices: [0], command: 'python train.py --config configs/train.yaml', status: 'queued', waitingReason: 'GPU 0 空闲显存不足', createdAt: 1 }
 
 let container: HTMLDivElement
 let root: ReturnType<typeof createRoot>
@@ -223,8 +223,25 @@ describe('TrainingView submission and queue confirmation', () => {
     expect(container.querySelector('[role="status"]')).toBeNull()
   })
 
+  it('allows a freshly checked GPU with enough memory when utilization and compute process counts are unknown', async () => {
+    vi.spyOn(trainingApi, 'checkPaths').mockResolvedValue({ ok: true, workingDirectoryExists: true, scriptExists: true, configExists: true, pythonAvailable: true, nvidiaSmiAvailable: true, gpus: [{ ...gpu, utilization: null, memoryUsedMb: 16 * 1024, computeProcessCount: null, eligible: true, reasons: [] }], commandPreview: '', message: '显存检查通过' })
+    await act(async () => root.render(<TrainingView servers={[server]} snapshots={{}} onNotice={vi.fn()} />))
+    await openSavedProfile()
+    await act(async () => button('检查路径与环境').click())
+    const overview = container.querySelector('[aria-label="所有服务器 GPU 状态"]')!
+    expect(overview.textContent).toContain('当前空闲')
+    expect(overview.textContent).toContain('利用率 —')
+    expect(overview.textContent).toContain('进程未采样')
+    const card = overview.querySelector<HTMLInputElement>('input[aria-label="Training server GPU 0 RTX 4090"]')!
+    expect(card.disabled).toBe(false)
+    expect(card.checked).toBe(true)
+    expect(container.textContent).not.toContain('部分资源繁忙')
+    expect(container.querySelector('.training-gpu-rule')?.textContent).toContain('空闲显存 ≥ 8 GB')
+  })
+
   it('shows busy GPU checkboxes and does not submit a queue until the explicit second confirmation', async () => {
-    const submit = vi.spyOn(trainingApi, 'submit').mockResolvedValueOnce({ job: null, requiresQueueConfirmation: true, reasons: ['GPU 0 存在计算进程'] }).mockImplementationOnce(async (id) => ({ job: { ...job, id }, requiresQueueConfirmation: false, reasons: [] }))
+    vi.mocked(trainingApi.listProfiles).mockResolvedValue([{ ...profile, minimumFreeMemoryGb: 10 }])
+    const submit = vi.spyOn(trainingApi, 'submit').mockResolvedValueOnce({ job: null, requiresQueueConfirmation: true, reasons: ['GPU 0 空闲显存不足 10 GB'] }).mockImplementationOnce(async (id) => ({ job: { ...job, id }, requiresQueueConfirmation: false, reasons: [] }))
     await render()
     await openSavedProfile()
     const busyGpu = container.querySelector<HTMLInputElement>('input[aria-label="Training server GPU 0 RTX 4090"]')

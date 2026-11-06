@@ -59,17 +59,25 @@ class TrainingQueueTests(unittest.TestCase):
 state=json.load(open(sys.argv[1], encoding='utf-8'))
 if state.get('error'): sys.exit(3)
 if sys.argv[2].startswith('--query-gpu='):
+    fields=sys.argv[2].split('=',1)[1].split(',')
+    if 'utilization.gpu' in fields and state.get('utilizationError'): sys.exit(4)
     for index, name in enumerate(['GPU-a','GPU-b','GPU-c']):
-        print('%s,%s,Fake GPU %s,%s,24576,%s' % (name,index,index,state.get('utilization',{}).get(name,0),state.get('used',{}).get(name,0)))
+        values={'uuid':name,'index':index,'name':'Fake GPU %s' % index,'utilization.gpu':state.get('utilization',{}).get(name,0),'memory.total':state.get('total',{}).get(name,24576),'memory.used':state.get('used',{}).get(name,0)}
+        print(','.join(str(values[field]) for field in fields))
 else:
-    for name in state.get('busy',[]): print('%s,12345' % name)
+    if state.get('processError'): sys.exit(5)
+    if 'processRows' in state: print(state['processRows'])
+    else:
+        for name in state.get('busy',[]): print('%s,12345' % name)
 """, encoding="utf-8")
+        self.smi_queries = []
         original_which = queue.shutil.which
         self.patches.append(mock.patch.object(queue.shutil, "which", side_effect=lambda name: "fake-nvidia-smi" if name == "nvidia-smi" else original_which(name)))
         self.patches[-1].start()
         def fake_run(arguments, **options):
             if arguments[0] != "fake-nvidia-smi":
                 return REAL_RUN(arguments, **options)
+            self.smi_queries.append(arguments[1])
             return REAL_RUN([sys.executable, str(self.fake_smi), str(self.gpu_state), arguments[1]], **options)
         self.patches.append(mock.patch.object(queue.subprocess, "run", side_effect=fake_run))
         self.patches[-1].start()
@@ -135,7 +143,7 @@ else:
         return output.getvalue()
 
     def test_datalist_runs_once_immediately_while_gpus_are_busy_then_training_waits(self):
-        self.state(busy=["GPU-a"])
+        self.state(busy=["GPU-a"], used={"GPU-a": 22000})
         profile, job_id = self.datalist_profile(), str(uuid.uuid4())
         rejected = queue.submit(job_id, profile, False)
         self.assertTrue(rejected["requiresQueueConfirmation"])
@@ -155,7 +163,7 @@ else:
         self.assertFalse(self.launches)
         queue.submit(job_id, profile, True)
         self.assertEqual(self.datalist_launches, [job_id])
-        self.state(busy=[])
+        self.state(busy=[], used={})
         self.tick_for(32)
         self.assertEqual(self.launches, [job_id])
 
@@ -167,10 +175,10 @@ else:
         self.assertEqual(queue.load_job(job_id)["stableSince"], 1000)
         self.assertIn("生成 datalist", queue.load_job(job_id)["waitingReason"])
         self.finish_datalist(job_id)
-        self.state(busy=["GPU-a"])
+        self.state(busy=["GPU-a"], used={"GPU-a": 22000})
         self.tick_for(2)
         self.assertFalse(self.launches)
-        self.state(busy=[])
+        self.state(busy=[], used={})
         self.tick_for(32)
         self.assertEqual(self.launches, [job_id])
 
@@ -309,7 +317,7 @@ else:
             queue.tick()
 
     def test_busy_submit_requires_explicit_confirmation_without_a_remote_job_or_daemon(self):
-        self.state(busy=["GPU-a"])
+        self.state(used={"GPU-a": 22000})
         job_id = str(uuid.uuid4())
         response = queue.submit(job_id, self.profile(), False)
         self.assertTrue(response["requiresQueueConfirmation"])
@@ -330,36 +338,114 @@ else:
         self.assertEqual(queue.load_job(job_id)["profile"]["extraArguments"], "--epochs 2")
 
     def test_all_selected_gpus_must_be_free_for_a_continuous_30_seconds(self):
-        self.state(busy=["GPU-b"])
+        self.state(used={"GPU-b": 22000})
         job_id = str(uuid.uuid4())
         queue.submit(job_id, self.profile(["GPU-a", "GPU-b"]), True)
         self.tick_for(30)
         self.assertFalse(self.launches)
-        self.state(busy=[])
+        self.state(used={})
         self.tick_for(30)
         self.assertFalse(self.launches)  # First idle sample begins, not ends, the interval.
         self.tick_for(2)
         self.assertEqual(self.launches, [job_id])
         self.assertEqual(queue.load_job(job_id)["gpuIndices"], [0, 1])
 
-    def test_any_compute_pid_including_current_user_blocks_training(self):
-        self.state(busy=["GPU-a"], used={"GPU-a": 1})
+    def test_compute_processes_and_high_utilization_do_not_block_sufficient_memory(self):
+        self.state(busy=["GPU-a"], used={"GPU-a": 1}, utilization={"GPU-a": 99})
         devices, error = queue.probe_gpus(8)
         self.assertIsNone(error)
         self.assertEqual(devices[0]["computeProcessCount"], 1)
-        self.assertFalse(devices[0]["eligible"])
-        self.assertTrue(queue.readiness(self.profile(), devices))
+        self.assertTrue(devices[0]["eligible"])
+        self.assertFalse(queue.readiness(self.profile(), devices))
+        job_id = str(uuid.uuid4())
+        self.assertFalse(queue.submit(job_id, self.profile(), False)["requiresQueueConfirmation"])
+        self.tick_for(30)
+        self.assertEqual(self.launches, [job_id])
 
-    def test_utilization_and_memory_thresholds_use_unrounded_values(self):
-        self.state(utilization={"GPU-a": 10.1})
-        self.assertTrue(queue.readiness(self.profile(), queue.probe_gpus()[0]))
+    def test_memory_thresholds_use_unrounded_values_and_accept_the_exact_boundary(self):
+        self.state(utilization={"GPU-a": 100})
+        self.assertFalse(queue.readiness(self.profile(), queue.probe_gpus()[0]))
         self.state(utilization={"GPU-a": 10}, used={"GPU-a": 16384.1})
         self.assertTrue(queue.readiness(self.profile(), queue.probe_gpus()[0]))
         self.state(used={"GPU-a": 16384})
         self.assertFalse(queue.readiness(self.profile(), queue.probe_gpus()[0]))
 
+    def test_optional_telemetry_failures_are_unknown_and_do_not_block_preflight_or_training(self):
+        self.state(processError=True, utilizationError=True)
+        profile, job_id = self.profile(), str(uuid.uuid4())
+        report, issues, error = queue.check_paths(profile)
+        self.assertTrue(report["ok"])
+        self.assertFalse(issues)
+        self.assertIsNone(error)
+        self.assertIsNone(report["gpus"][0]["utilization"])
+        self.assertIsNone(report["gpus"][0]["computeProcessCount"])
+        self.assertTrue(report["gpus"][0]["eligible"])
+        submitted = queue.submit(job_id, profile, False)
+        self.assertFalse(submitted["requiresQueueConfirmation"])
+        self.smi_queries.clear()
+        self.tick_for(30)
+        self.assertEqual(self.launches, [job_id])
+        self.assertTrue(self.smi_queries)
+        self.assertTrue(all("utilization" not in query and "compute-apps" not in query for query in self.smi_queries))
+
+    def test_optional_invalid_utilization_and_unmapped_processes_do_not_discard_memory(self):
+        for utilization in ("N/A", "nan", -1, 101):
+            with self.subTest(utilization=utilization):
+                self.state(utilization={"GPU-a": utilization}, processRows="MIG-unmapped,12345")
+                devices, error = queue.probe_gpus(8)
+                self.assertIsNone(error)
+                self.assertIsNone(devices[0]["utilization"])
+                self.assertIsNone(devices[0]["computeProcessCount"])
+                self.assertTrue(devices[0]["eligible"])
+                self.assertFalse(queue.readiness(self.profile(), devices))
+
+    def test_invalid_memory_is_still_required_even_when_optional_diagnostics_are_healthy(self):
+        for field, value in (("used", "N/A"), ("used", "nan"), ("used", -1), ("used", 24577), ("total", 0)):
+            with self.subTest(field=field, value=value):
+                updates = {"used": {}, "total": {}}
+                updates[field] = {"GPU-a": value}
+                self.state(**updates)
+                devices, error = queue.probe_gpus(8)
+                self.assertEqual(devices, [])
+                self.assertIsNotNone(error)
+                self.assertTrue(queue.readiness(self.profile(), devices, error))
+
+    def test_start_time_recheck_waits_if_memory_drops_after_the_stability_sample(self):
+        profile, job_id = self.profile(), str(uuid.uuid4())
+        queue.submit(job_id, profile, True)
+        self.tick_for(28)
+        real_probe, call_count = queue.probe_gpus, [0]
+        def change_before_launch(*arguments, **keywords):
+            call_count[0] += 1
+            if call_count[0] == 2:
+                self.state(used={"GPU-a": 22000})
+            return real_probe(*arguments, **keywords)
+        with mock.patch.object(queue, "probe_gpus", side_effect=change_before_launch):
+            self.tick_for(2)
+        self.assertEqual(call_count[0], 2)
+        self.assertFalse(self.launches)
+        waiting = queue.load_job(job_id)
+        self.assertEqual(waiting["status"], "queued")
+        self.assertIsNone(waiting["stableSince"])
+        self.assertIn("空闲显存", waiting["waitingReason"])
+
+    def test_existing_queued_job_reuses_its_snapshot_when_restored_under_memory_policy(self):
+        profile, job_id = self.profile(), str(uuid.uuid4())
+        self.state(used={"GPU-a": 22000})
+        queue.submit(job_id, profile, True)
+        old = queue.load_job(job_id)
+        old["waitingReason"] = "GPU 0 存在计算进程"
+        queue.save_job(old)
+        self.state(used={}, busy=["GPU-a"], utilization={"GPU-a": 100})
+        restored = queue.submit(job_id, profile, True)
+        self.assertEqual(restored["job"]["id"], job_id)
+        self.tick_for(32)
+        self.assertEqual(self.launches, [job_id])
+        self.assertEqual(len(queue.all_jobs()), 1)
+        self.assertEqual(queue.load_job(job_id)["specHash"], old["specHash"])
+
     def test_overlapping_gpu_jobs_are_fifo_while_disjoint_jobs_run_in_parallel(self):
-        self.state(busy=["GPU-b"])
+        self.state(used={"GPU-b": 22000})
         first, second, independent = [str(uuid.uuid4()) for _ in range(3)]
         queue.submit(first, self.profile(["GPU-a", "GPU-b"]), True)
         self.clock += 0.1
@@ -368,7 +454,7 @@ else:
         queue.submit(independent, self.profile(["GPU-c"]), True)
         self.tick_for(32)
         self.assertEqual(self.launches, [independent])
-        self.state(busy=[])
+        self.state(used={})
         self.tick_for(32)
         self.assertEqual(self.launches, [independent, first])
         self.assertEqual(queue.load_job(second)["status"], "queued")
